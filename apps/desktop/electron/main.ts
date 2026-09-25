@@ -5,13 +5,11 @@ import {
   dialog,
   Menu,
   nativeImage,
-  net,
   protocol,
   shell,
   type MenuItemConstructorOptions,
   type MessageBoxOptions,
 } from "electron";
-import { isValidHttpBaseUrl } from "@pi-gui/pi-sdk-driver";
 import { createRequire } from "node:module";
 import { randomUUID } from "node:crypto";
 import type { AgentToolResult, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -20,6 +18,8 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { augmentPosixPath } from "../scripts/augment-path.cjs";
 import { DesktopAppStore } from "./application/app-store";
+import { initializeDesktopProxy } from "./network/desktop-proxy";
+import { probeCustomProviderModels } from "./network/provider-model-probe";
 import { WindowOwner } from "./windows/window-owner";
 import { TurnCheckpointStore } from "./workbench/checkpoint-store";
 import {
@@ -57,8 +57,6 @@ import {
   isSinglePressCommand,
   isCloseFocusedSurfaceShortcut,
   platformShortcutModifier,
-  type CustomProviderProbeInput,
-  type CustomProviderProbeResult,
 } from "../contracts/ipc";
 import {
   assertComposerImageBytes,
@@ -821,6 +819,18 @@ app
       return;
     }
 
+    // Configure both fetch and WebSocket before any provider runtime is created.
+    try {
+      await initializeDesktopProxy();
+    } catch {
+      dialog.showErrorBox(
+        "Unable to initialize the proxy",
+        "Check httpProxy in Pi's global settings.json and the HTTP_PROXY / HTTPS_PROXY environment variables. Proxy addresses must use http:// or https://. Correct the configuration and restart pi-gui.",
+      );
+      app.exit(1);
+      return;
+    }
+
     // On macOS, packaged builds already render the dock icon from `icon.icns`
     // in the app bundle. In dev we override the generic Electron dock icon with
     // the real PNG so the running app looks right end-to-end.
@@ -1458,55 +1468,4 @@ function escapeHtml(value: string): string {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
-}
-
-async function probeCustomProviderModels(
-  input: CustomProviderProbeInput,
-): Promise<CustomProviderProbeResult> {
-  const baseUrl = input.baseUrl?.trim();
-  if (!baseUrl || !isValidHttpBaseUrl(baseUrl)) {
-    return { ok: false, error: "Base URL must start with http:// or https://" };
-  }
-  const target = `${baseUrl.replace(/\/+$/, "")}/models`;
-  const apiKey = input.apiKey?.trim();
-  try {
-    const response = await net.fetch(target, {
-      method: "GET",
-      headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : undefined,
-      signal: AbortSignal.timeout(5000),
-    });
-    if (!response.ok) {
-      return { ok: false, error: `${response.status} ${response.statusText} from ${target}` };
-    }
-    const payload = (await response.json()) as unknown;
-    const data = (payload as { data?: unknown }).data;
-    if (!Array.isArray(data)) {
-      return { ok: false, error: `Response from ${target} is missing a "data" array` };
-    }
-    const models = data
-      .map((entry) => {
-        if (
-          entry &&
-          typeof entry === "object" &&
-          typeof (entry as { id?: unknown }).id === "string"
-        ) {
-          return (entry as { id: string }).id;
-        }
-        return undefined;
-      })
-      .filter((id): id is string => Boolean(id && id.length > 0));
-    return { ok: true, models };
-  } catch (error) {
-    return { ok: false, error: describeProbeError(error, target) };
-  }
-}
-
-function describeProbeError(error: unknown, target: string): string {
-  if (error instanceof Error && error.name === "TimeoutError") {
-    return `Timed out after 5s contacting ${target}`;
-  }
-  if (error instanceof Error) {
-    return error.message;
-  }
-  return String(error);
 }
