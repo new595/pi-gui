@@ -26,6 +26,7 @@ import type { DesktopExtensionViewOwner } from "../extensions/extension-view-own
 import { registerExtensionViewRequests } from "./extension-view-requests";
 import { registerReviewRequests, type ReviewRequestsOwner } from "./review-requests";
 import { mainFrameHandler } from "./main-frame-ipc";
+import type { DesktopProxyStatus } from "../../contracts/proxy-status";
 import { assertComposerAttachmentPixels } from "./composer-attachment-pixels";
 import {
   expectAppView,
@@ -165,6 +166,8 @@ export interface DesktopIpcOwners {
 }
 
 export interface DesktopIpcCapabilities {
+  readonly getProxyStatus: () => Promise<DesktopProxyStatus>;
+  readonly openProxySettings: () => Promise<string | undefined>;
   readonly ping: () => string;
   readonly theme: ThemeManager;
   readonly openExternal: (url: string) => Promise<void>;
@@ -606,6 +609,22 @@ export function registerDesktopIpc({
     windows.windowForSender(event.sender);
     return capabilities.notificationPermission()?.openSystemSettings() ?? Promise.resolve();
   });
+  handleMainFrame(
+    desktopIpc.getProxyStatus,
+    () => undefined,
+    () => capabilities.getProxyStatus(),
+  );
+  handleMainFrame(
+    desktopIpc.openProxySettings,
+    () => undefined,
+    async () => {
+      try {
+        return await capabilities.openProxySettings();
+      } catch {
+        return "Could not open Pi settings. Check that the settings file is available.";
+      }
+    },
+  );
 
   ipcMain.handle(desktopIpc.createSession, (event, rawInput: unknown) =>
     run(event, () => owners.conversation.createSession(expectCreateSessionInput(rawInput))),

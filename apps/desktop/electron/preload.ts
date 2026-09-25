@@ -25,6 +25,7 @@ import {
   type TerminalPanelSnapshot,
   type TerminalSize,
 } from "../contracts/ipc";
+import type { DesktopProxyStatus } from "../contracts/proxy-status";
 import type { ClipboardImageRead } from "../contracts/composer-attachments";
 import type { SaveTaskWorkbenchTemplateInput, TaskWorkbenchTemplate } from "../contracts/workbench";
 import type {
@@ -451,6 +452,10 @@ contextBridge.exposeInMainWorld("piApp", {
     ) as Promise<DesktopNotificationPermissionStatus>,
   openSystemNotificationSettings: () =>
     ipcRenderer.invoke(desktopIpc.openSystemNotificationSettings) as Promise<void>,
+  getProxyStatus: () =>
+    ipcRenderer.invoke(desktopIpc.getProxyStatus) as Promise<DesktopProxyStatus>,
+  openProxySettings: () =>
+    ipcRenderer.invoke(desktopIpc.openProxySettings) as Promise<string | undefined>,
   onNotificationPermissionStatusChanged: (
     callback: (status: DesktopNotificationPermissionStatus) => void,
   ) => {

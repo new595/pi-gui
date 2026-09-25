@@ -13,6 +13,7 @@ import type {
   SessionTreeSnapshot,
 } from "@pi-gui/session-driver/types";
 import type { ClipboardImageRead } from "./composer-attachments";
+import type { DesktopProxyStatus } from "./proxy-status";
 import type { SessionRef } from "@pi-gui/session-driver/types";
 import type { SaveTaskWorkbenchTemplateInput, TaskWorkbenchTemplate } from "./workbench";
 import type {
@@ -158,6 +159,8 @@ export const desktopIpc = {
   getNotificationPermissionStatus: "pi-gui:get-notification-permission-status",
   requestNotificationPermission: "pi-gui:request-notification-permission",
   openSystemNotificationSettings: "pi-gui:open-system-notification-settings",
+  getProxyStatus: "pi-gui:get-proxy-status",
+  openProxySettings: "pi-gui:open-proxy-settings",
   notificationPermissionStatusChanged: "pi-gui:notification-permission-status-changed",
   pickComposerAttachments: "pi-gui:pick-composer-attachments",
   readClipboardImage: "pi-gui:read-clipboard-image",
@@ -707,6 +710,8 @@ export interface PiDesktopApi {
   getNotificationPermissionStatus(): Promise<DesktopNotificationPermissionStatus>;
   requestNotificationPermission(): Promise<DesktopNotificationPermissionStatus>;
   openSystemNotificationSettings(): Promise<void>;
+  getProxyStatus(): Promise<DesktopProxyStatus>;
+  openProxySettings(): Promise<string | undefined>;
   onNotificationPermissionStatusChanged(
     callback: (status: DesktopNotificationPermissionStatus) => void,
   ): () => void;

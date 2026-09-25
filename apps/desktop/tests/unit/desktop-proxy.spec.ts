@@ -19,11 +19,96 @@ const jiti = createJiti(__filename);
 let createDesktopProxyDispatcher: typeof import("../../electron/network/desktop-proxy").createDesktopProxyDispatcher;
 let initializeDesktopProxy: typeof import("../../electron/network/desktop-proxy").initializeDesktopProxy;
 let resolveDesktopProxyOptions: typeof import("../../electron/network/desktop-proxy").resolveDesktopProxyOptions;
+let getDesktopProxyStartupErrorMessage: typeof import("../../electron/network/desktop-proxy").getDesktopProxyStartupErrorMessage;
+let getDesktopProxyStatus: typeof import("../../electron/network/desktop-proxy").getDesktopProxyStatus;
+let getDesktopProxySettingsPath: typeof import("../../electron/network/desktop-proxy").getDesktopProxySettingsPath;
 test.beforeAll(async () => {
-  ({ createDesktopProxyDispatcher, initializeDesktopProxy, resolveDesktopProxyOptions } =
-    await jiti.import<typeof import("../../electron/network/desktop-proxy")>(
-      "../../electron/network/desktop-proxy.ts",
-    ));
+  ({
+    createDesktopProxyDispatcher,
+    initializeDesktopProxy,
+    resolveDesktopProxyOptions,
+    getDesktopProxyStartupErrorMessage,
+    getDesktopProxyStatus,
+    getDesktopProxySettingsPath,
+  } = await jiti.import<typeof import("../../electron/network/desktop-proxy")>(
+    "../../electron/network/desktop-proxy.ts",
+  ));
+});
+
+test("proxy status is unavailable until initialization succeeds", () => {
+  expect(() => getDesktopProxyStatus()).toThrow(
+    "Desktop proxy status is unavailable before initialization completes.",
+  );
+});
+
+test("startup error messages classify settings and each proxy variable without leaking values", async () => {
+  const agentDir = await mkdtemp(join(tmpdir(), "pi-gui-proxy-errors-"));
+  await writeFile(join(agentDir, "settings.json"), "{bad", "utf8");
+  const startupMessage = async (env: NodeJS.ProcessEnv) => {
+    try {
+      await initializeDesktopProxy({ agentDir, env });
+      return "did not reject";
+    } catch (error) {
+      return getDesktopProxyStartupErrorMessage(error);
+    }
+  };
+  const jsonError = await startupMessage({});
+  expect(getDesktopProxySettingsPath()).toBe(join(agentDir, "settings.json"));
+  expect(jsonError).toContain("invalid JSON");
+  expect(jsonError).not.toContain("bad");
+  await writeFile(join(agentDir, "settings.json"), "{}", "utf8");
+  expect(await startupMessage({ HTTP_PROXY: "socks5://u:pass@x" })).toContain("HTTP_PROXY");
+  expect(await startupMessage({ HTTPS_PROXY: "socks5://u:pass@x" })).toContain("HTTPS_PROXY");
+  await writeFile(
+    join(agentDir, "settings.json"),
+    JSON.stringify({ httpProxy: "socks5://private:secret@x" }),
+    "utf8",
+  );
+  const explicitError = await startupMessage({});
+  expect(explicitError).toContain("httpProxy");
+  expect(explicitError).not.toContain("secret");
+  expect(getDesktopProxyStartupErrorMessage(new Error("secret details"))).toBe(
+    "Unable to initialize proxy settings. Check Pi settings and proxy environment variables.",
+  );
+});
+
+test("proxy status reports the effective, redacted source and HTTPS fallback", async () => {
+  const agentDir = await mkdtemp(join(tmpdir(), "pi-gui-proxy-status-"));
+  await writeFile(
+    join(agentDir, "settings.json"),
+    JSON.stringify({ httpProxy: "https://user:pass@proxy.example:8443" }),
+    "utf8",
+  );
+  const dispatcher = await initializeDesktopProxy({
+    agentDir,
+    env: { HTTP_PROXY: "http://env.example:8080", NO_PROXY: ".internal" },
+  });
+  try {
+    expect(getDesktopProxyStatus()).toEqual({
+      source: "pi-settings",
+      httpProxy: "https://proxy.example:8443",
+      httpsProxy: "https://proxy.example:8443",
+      noProxy: ".internal",
+      settingsPath: join(agentDir, "settings.json"),
+    });
+  } finally {
+    await dispatcher.close();
+  }
+
+  await writeFile(join(agentDir, "settings.json"), "{}", "utf8");
+  const envDispatcher = await initializeDesktopProxy({
+    agentDir,
+    env: { HTTP_PROXY: "http://user:pass@env.example:8080", NO_PROXY: "" },
+  });
+  try {
+    expect(getDesktopProxyStatus()).toMatchObject({
+      source: "environment",
+      httpProxy: "http://env.example:8080",
+      httpsProxy: "http://env.example:8080",
+    });
+  } finally {
+    await envDispatcher.close();
+  }
 });
 
 test("resolves explicit, environment, and protocol-specific proxy configuration", () => {
@@ -78,7 +163,31 @@ test("rejects invalid explicit/environment proxy values without echoing credenti
   }
   expect(() =>
     resolveDesktopProxyOptions({}, { HTTPS_PROXY: "socks5://name:secret@proxy" }),
-  ).toThrow("Invalid proxy environment configuration");
+  ).toThrow("HTTPS_PROXY");
+
+  for (const httpProxy of [null, 7]) {
+    let errorMessage = "";
+    try {
+      resolveDesktopProxyOptions({ httpProxy }, {});
+    } catch (error) {
+      errorMessage = getDesktopProxyStartupErrorMessage(error);
+    }
+    expect(errorMessage).toContain("Invalid httpProxy");
+    expect(errorMessage).not.toContain("Unable to initialize proxy settings");
+  }
+});
+
+test("dispatcher construction failures do not claim a specific environment variable", () => {
+  let errorMessage = "";
+  try {
+    createDesktopProxyDispatcher({ httpProxy: "http://private:secret@proxy.example/path" }, {});
+  } catch (error) {
+    errorMessage = getDesktopProxyStartupErrorMessage(error);
+  }
+  expect(errorMessage).toContain("configured proxy");
+  expect(errorMessage).not.toContain("HTTP_PROXY");
+  expect(errorMessage).not.toContain("HTTPS_PROXY");
+  expect(errorMessage).not.toContain("secret");
 });
 
 test("a local CONNECT proxy carries successive HTTP and SSE requests", async () => {

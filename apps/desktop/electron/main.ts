@@ -18,7 +18,13 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { augmentPosixPath } from "../scripts/augment-path.cjs";
 import { DesktopAppStore } from "./application/app-store";
-import { initializeDesktopProxy } from "./network/desktop-proxy";
+import {
+  getDesktopProxySettingsPath,
+  getDesktopProxyStartupErrorMessage,
+  getDesktopProxyStatus,
+  initializeDesktopProxy,
+} from "./network/desktop-proxy";
+import personalBuild from "../personal-build.json";
 import { probeCustomProviderModels } from "./network/provider-model-probe";
 import { WindowOwner } from "./windows/window-owner";
 import { TurnCheckpointStore } from "./workbench/checkpoint-store";
@@ -822,11 +828,21 @@ app
     // Configure both fetch and WebSocket before any provider runtime is created.
     try {
       await initializeDesktopProxy();
-    } catch {
-      dialog.showErrorBox(
-        "Unable to initialize the proxy",
-        "Check httpProxy in Pi's global settings.json and the HTTP_PROXY / HTTPS_PROXY environment variables. Proxy addresses must use http:// or https://. Correct the configuration and restart pi-gui.",
-      );
+    } catch (error) {
+      const settingsPath = getDesktopProxySettingsPath();
+      const result = await dialog.showMessageBox({
+        type: "error",
+        title: "Unable to initialize the proxy",
+        message: getDesktopProxyStartupErrorMessage(error),
+        detail: "Correct the configuration, then start pi-gui again.",
+        buttons: settingsPath ? ["Open Pi settings", "Exit"] : ["Exit"],
+        defaultId: 0,
+        cancelId: settingsPath ? 1 : 0,
+      });
+      if (settingsPath && result.response === 0) {
+        const openError = await openProxySettings();
+        if (openError) dialog.showErrorBox("Unable to open Pi settings", openError);
+      }
       app.exit(1);
       return;
     }
@@ -1047,6 +1063,12 @@ app
         pickWorkspace: (window) => pickWorkspaceViaDialog(window),
         createLoginCallbacks: (window) => createRuntimeLoginCallbacks(window),
         probeCustomProviderModels,
+        getProxyStatus: async () => ({
+          ...getDesktopProxyStatus(),
+          version: app.getVersion(),
+          buildLabel: personalBuild.label,
+        }),
+        openProxySettings,
         notificationPermission: () => notificationPermissionService,
         terminal: getTerminalService,
         optionalTerminal: () => terminalService,
@@ -1468,4 +1490,17 @@ function escapeHtml(value: string): string {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
+}
+
+async function openProxySettings(): Promise<string | undefined> {
+  const settingsPath = getDesktopProxySettingsPath();
+  if (!settingsPath) return "Pi settings are not available yet. Restart pi-gui and try again.";
+  try {
+    const result = await shell.openPath(settingsPath);
+    return result
+      ? "Could not open Pi settings. Check that settings.json exists and that your account can open it."
+      : undefined;
+  } catch {
+    return "Could not open Pi settings. Check that settings.json exists and that your account can open it.";
+  }
 }

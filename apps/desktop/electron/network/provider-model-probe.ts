@@ -24,7 +24,7 @@ export async function probeCustomProviderModels(
     if (!response.ok) {
       return {
         ok: false,
-        error: `${response.status} ${response.statusText} from ${displayTarget}`,
+        error: describeHttpStatus(response.status, displayTarget),
       };
     }
 
@@ -60,6 +60,8 @@ function redactUrlCredentials(target: string): string {
     const url = new URL(target);
     url.username = "";
     url.password = "";
+    url.search = "";
+    url.hash = "";
     return url.toString();
   } catch {
     return "the configured provider URL";
@@ -72,16 +74,34 @@ function describeProbeError(error: unknown, target: string): string {
   }
 
   const code = getSafeNetworkErrorCode(error);
+  if (code === "ETIMEDOUT" || code === "ESOCKETTIMEDOUT" || code === "UND_ERR_CONNECT_TIMEOUT") {
+    return `Timed out contacting ${target}. Check the provider or proxy network and try again.`;
+  }
   if (code === "ECONNREFUSED") {
     return `Could not connect to ${target}. Check the provider or proxy address and try again.`;
   }
   if (code === "ENOTFOUND" || code === "EAI_AGAIN") {
     return `Could not resolve the provider host for ${target}. Check the network or proxy settings and try again.`;
   }
-  if (code === "CERT_HAS_EXPIRED" || code === "UNABLE_TO_VERIFY_LEAF_SIGNATURE") {
+  if (
+    code === "CERT_HAS_EXPIRED" ||
+    code === "UNABLE_TO_VERIFY_LEAF_SIGNATURE" ||
+    code === "ERR_TLS_CERT_ALTNAME_INVALID" ||
+    code === "DEPTH_ZERO_SELF_SIGNED_CERT"
+  ) {
     return `Could not verify the TLS certificate for ${target}. Check the provider or proxy certificate settings.`;
   }
   return `Could not reach ${target}. Check the provider URL, network, or proxy settings and try again.`;
+}
+
+function describeHttpStatus(status: number, target: string): string {
+  if (status === 401 || status === 403)
+    return `${status} Authentication or permission failed at ${target}. Check the API key and provider access.`;
+  if (status === 407)
+    return `407 Proxy authentication required for ${target}. Check proxy credentials in your proxy configuration.`;
+  if (status === 429) return `429 Provider rate limit reached at ${target}. Wait and try again.`;
+  if (status >= 500) return `${status} Provider service error at ${target}. Try again later.`;
+  return `${status} Provider request failed at ${target}. Check the provider URL and settings.`;
 }
 
 function getSafeNetworkErrorCode(error: unknown): string | undefined {
@@ -110,4 +130,9 @@ const SAFE_NETWORK_ERROR_CODES = new Set([
   "EAI_AGAIN",
   "CERT_HAS_EXPIRED",
   "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+  "ERR_TLS_CERT_ALTNAME_INVALID",
+  "DEPTH_ZERO_SELF_SIGNED_CERT",
+  "ETIMEDOUT",
+  "ESOCKETTIMEDOUT",
+  "UND_ERR_CONNECT_TIMEOUT",
 ]);

@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { EnvHttpProxyAgent, install, setGlobalDispatcher } from "undici";
+import type { ProxyStatusSnapshot } from "../../contracts/proxy-status";
 
 export interface DesktopProxyOptions {
   readonly httpProxy: string;
@@ -15,10 +16,56 @@ export interface InitializeDesktopProxyOptions {
 
 const INVALID_EXPLICIT_PROXY =
   "Invalid httpProxy in Pi settings: expected a valid http:// or https:// proxy URL.";
-const INVALID_ENV_PROXY =
-  "Invalid proxy environment configuration: expected a valid http:// or https:// proxy URL.";
 const SETTINGS_READ_ERROR = "Unable to read Pi proxy settings.";
 const SETTINGS_PARSE_ERROR = "Pi proxy settings contain invalid JSON.";
+
+type ProxyConfigErrorKind = "explicit" | "http-env" | "https-env" | "parse" | "read" | "dispatcher";
+class DesktopProxyConfigError extends Error {
+  constructor(readonly kind: ProxyConfigErrorKind) {
+    super(
+      kind === "explicit"
+        ? INVALID_EXPLICIT_PROXY
+        : kind === "http-env"
+          ? "Invalid HTTP_PROXY environment value: expected a valid http:// or https:// proxy URL."
+          : kind === "https-env"
+            ? "Invalid HTTPS_PROXY environment value: expected a valid http:// or https:// proxy URL."
+            : kind === "parse"
+              ? SETTINGS_PARSE_ERROR
+              : kind === "read"
+                ? SETTINGS_READ_ERROR
+                : "Unable to initialize the configured proxy. Check Pi settings and proxy environment configuration.",
+    );
+    this.name = "DesktopProxyConfigError";
+  }
+}
+let effectiveStatus: ProxyStatusSnapshot | undefined;
+let configuredSettingsPath: string | undefined;
+
+export function getDesktopProxySettingsPath(): string | undefined {
+  return configuredSettingsPath;
+}
+
+export function getDesktopProxyStartupErrorMessage(error: unknown): string {
+  return error instanceof DesktopProxyConfigError
+    ? error.message
+    : "Unable to initialize proxy settings. Check Pi settings and proxy environment variables.";
+}
+
+function safeOrigin(value: string): string | null {
+  if (!value) return null;
+  try {
+    return new URL(value).origin;
+  } catch {
+    return null;
+  }
+}
+
+export function getDesktopProxyStatus(): ProxyStatusSnapshot {
+  if (!effectiveStatus) {
+    throw new Error("Desktop proxy status is unavailable before initialization completes.");
+  }
+  return effectiveStatus;
+}
 
 function getEnvironmentValue(env: NodeJS.ProcessEnv, name: string): string | undefined {
   // Windows environment names are case-insensitive in practice. Prefer the
@@ -29,22 +76,25 @@ function getEnvironmentValue(env: NodeJS.ProcessEnv, name: string): string | und
   return typeof value === "string" ? value.trim() || undefined : undefined;
 }
 
-function validateProxyUrl(value: string, errorMessage: string): string {
+function validateProxyUrl(value: string, kind: ProxyConfigErrorKind): string {
   let parsed: URL;
   try {
     parsed = new URL(value);
   } catch {
-    throw new Error(errorMessage);
+    throw new DesktopProxyConfigError(kind);
   }
   if ((parsed.protocol !== "http:" && parsed.protocol !== "https:") || !parsed.hostname) {
-    throw new Error(errorMessage);
+    throw new DesktopProxyConfigError(kind);
   }
   return value;
 }
 
-function validateEnvironmentProxy(value: string | undefined): string {
+function validateEnvironmentProxy(
+  value: string | undefined,
+  kind: "http-env" | "https-env",
+): string {
   if (!value) return "";
-  return validateProxyUrl(value, INVALID_ENV_PROXY);
+  return validateProxyUrl(value, kind);
 }
 
 /**
@@ -63,11 +113,11 @@ export function resolveDesktopProxyOptions(
     const setting = (settings as Record<string, unknown>).httpProxy;
     if (setting !== undefined) {
       if (typeof setting !== "string") {
-        throw new Error(INVALID_EXPLICIT_PROXY);
+        throw new DesktopProxyConfigError("explicit");
       }
       const trimmed = setting.trim();
       if (trimmed) {
-        explicitProxy = validateProxyUrl(trimmed, INVALID_EXPLICIT_PROXY);
+        explicitProxy = validateProxyUrl(trimmed, "explicit");
       }
     }
   }
@@ -80,8 +130,14 @@ export function resolveDesktopProxyOptions(
     };
   }
 
-  const httpEnvironmentProxy = validateEnvironmentProxy(getEnvironmentValue(env, "HTTP_PROXY"));
-  const httpsEnvironmentProxy = validateEnvironmentProxy(getEnvironmentValue(env, "HTTPS_PROXY"));
+  const httpEnvironmentProxy = validateEnvironmentProxy(
+    getEnvironmentValue(env, "HTTP_PROXY"),
+    "http-env",
+  );
+  const httpsEnvironmentProxy = validateEnvironmentProxy(
+    getEnvironmentValue(env, "HTTPS_PROXY"),
+    "https-env",
+  );
   return {
     httpProxy: httpEnvironmentProxy,
     // Undici falls back to httpProxy for HTTPS when httpsProxy is empty, which
@@ -105,7 +161,7 @@ export function createDesktopProxyDispatcher(
     });
   } catch {
     // Constructor diagnostics may echo a proxy URI, including credentials.
-    throw new Error(INVALID_ENV_PROXY);
+    throw new DesktopProxyConfigError("dispatcher");
   }
 }
 
@@ -117,13 +173,13 @@ async function readGlobalSettings(agentDir: string): Promise<unknown> {
     if (error !== null && typeof error === "object" && "code" in error && error.code === "ENOENT") {
       return {};
     }
-    throw new Error(SETTINGS_READ_ERROR);
+    throw new DesktopProxyConfigError("read");
   }
 
   try {
     return JSON.parse(content) as unknown;
   } catch {
-    throw new Error(SETTINGS_PARSE_ERROR);
+    throw new DesktopProxyConfigError("parse");
   }
 }
 
@@ -133,9 +189,29 @@ export async function initializeDesktopProxy(
 ): Promise<EnvHttpProxyAgent> {
   const agentDir =
     options.agentDir ?? (await import("@earendil-works/pi-coding-agent")).getAgentDir();
+  configuredSettingsPath = join(agentDir, "settings.json");
   const settings = await readGlobalSettings(agentDir);
-  const dispatcher = createDesktopProxyDispatcher(settings, options.env ?? process.env);
+  const env = options.env ?? process.env;
+  const resolved = resolveDesktopProxyOptions(settings, env);
+  const explicit =
+    settings !== null &&
+    typeof settings === "object" &&
+    !Array.isArray(settings) &&
+    typeof (settings as Record<string, unknown>).httpProxy === "string" &&
+    Boolean(((settings as Record<string, unknown>).httpProxy as string).trim());
+  const environment = Boolean(
+    getEnvironmentValue(env, "HTTP_PROXY") || getEnvironmentValue(env, "HTTPS_PROXY"),
+  );
+  const status: ProxyStatusSnapshot = {
+    source: explicit ? "pi-settings" : environment ? "environment" : "direct",
+    httpProxy: safeOrigin(resolved.httpProxy),
+    httpsProxy: safeOrigin(resolved.httpsProxy || resolved.httpProxy),
+    noProxy: resolved.noProxy,
+    settingsPath: configuredSettingsPath,
+  };
+  const dispatcher = createDesktopProxyDispatcher(settings, env);
   setGlobalDispatcher(dispatcher);
   install();
+  effectiveStatus = status;
   return dispatcher;
 }

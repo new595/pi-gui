@@ -3,6 +3,7 @@ import type { RuntimeSnapshot } from "@pi-gui/session-driver/runtime-types";
 import type { ModelSettingsScopeMode } from "../../../contracts/desktop-state";
 import { SettingsSegmented, SettingsSwitch } from "./settings-controls";
 import { SettingsGroup, SettingsRow } from "./settings-utils";
+import { SettingsProxyStatus } from "./settings-proxy-status";
 
 interface SettingsGeneralSectionProps {
   readonly runtime?: RuntimeSnapshot;
@@ -84,6 +85,7 @@ export function SettingsGeneralSection({
           />
         </SettingsRow>
       </SettingsGroup>
+      <SettingsProxyStatus />
     </>
   );
 }

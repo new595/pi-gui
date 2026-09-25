@@ -52,8 +52,54 @@ test("model probe validates the base URL and reports response contracts", async 
     ),
   ).resolves.toMatchObject({
     ok: false,
-    error: "502 Bad Gateway from http://provider.example/v1/models",
+    error: "502 Provider service error at http://provider.example/v1/models. Try again later.",
   });
+});
+
+test("model probe gives actionable authentication, proxy, and rate-limit errors", async () => {
+  for (const [status, expected] of [
+    [401, "Authentication or permission failed"],
+    [403, "Authentication or permission failed"],
+    [407, "Proxy authentication required"],
+    [429, "Provider rate limit reached"],
+    [503, "Provider service error"],
+  ] as const) {
+    const result = await probeCustomProviderModels(
+      { baseUrl: "http://user:secret@provider.example/v1?token=hidden" },
+      async () => new Response("", { status }),
+    );
+    expect(result).toMatchObject({ ok: false });
+    if (!result.ok) {
+      expect(result.error).toContain(expected);
+      expect(result.error).not.toContain("secret");
+      expect(result.error).not.toContain("hidden");
+    }
+  }
+});
+
+test("model probe describes TLS and timeout failures without exposing nested causes", async () => {
+  for (const [name, code, expected] of [
+    ["TimeoutError", undefined, "Timed out after 5s"],
+    ["TypeError", "ERR_TLS_CERT_ALTNAME_INVALID", "Could not verify the TLS certificate"],
+    ["TypeError", "ETIMEDOUT", "Timed out contacting"],
+  ] as const) {
+    const error = Object.assign(new Error("secret-url-with-creds"), {
+      name,
+      cause: { code, message: "private details" },
+    });
+    const result = await probeCustomProviderModels(
+      { baseUrl: "http://provider.example" },
+      async () => {
+        throw error;
+      },
+    );
+    expect(result).toMatchObject({ ok: false });
+    if (!result.ok) {
+      expect(result.error).toContain(expected);
+      expect(result.error).not.toContain("secret-url");
+      expect(result.error).not.toContain("private details");
+    }
+  }
 });
 
 test("model probe hides credentials when fetch fails", async () => {

@@ -28,7 +28,9 @@
 
 `NO_PROXY`（也可用小写 `no_proxy`）在显式和环境代理下都生效，命中时绕过代理。实现采用 Undici 8.5 `EnvHttpProxyAgent` 语义：逗号或空格分隔的主机项；支持主机、子域、`.example.com` / `*.example.com` 通配符、可选 `:port`，以及单独的 `*` 全部绕过。环境值会在启动时读取为快照，运行中更改变量或 settings 文件都需重启。
 
-没有 GUI 代理开关，也没有热更新。本模块不改写 `process.env`。
+没有 GUI 代理开关或热更新。本模块不改写 `process.env`。
+
+General 设置页的 **Pi and proxy** 区域只读展示应用版本与构建标签、启动时记录的代理来源、HTTP/HTTPS 代理地址和 `NO_PROXY`。Refresh 重新读取这份启动快照，不会探测 provider 连通性，也不会应用运行期间对设置或环境变量的修改；改动需完全退出并重启 pi-gui。**Open Pi settings** 打开当前用户 Pi agent 目录中的固定 `settings.json`。这一区域是配置状态展示，不是连通性诊断工具。
 
 ## 覆盖范围
 
@@ -40,7 +42,9 @@
 
 ## Windows 目录包隔离
 
-优先使用 Windows 目录包进行验证，将其保存在独立目录并使用包内的 `Start pi-gui proxy build.lnk` 快捷方式启动；不要将文件复制覆盖到官方安装目录。快捷方式调用同目录的 `Start pi-gui proxy build.cmd`，启动脚本仅将 Electron `userData` 指向 `%LOCALAPPDATA%\pi-gui-proxy-build`，保留默认 Pi agent 目录与 settings 配置。NSIS 安装器和 portable 包可能与其他安装共享应用身份，应在核对应用身份、数据目录后再考虑使用。
+个人版的日常启动入口为 `F:\Apps\pi-gui-proxy\Start pi-gui proxy.lnk`，通过固定启动器选择已部署的个人版本。版本部署与切换方式见[个人版构建与启动](personal-builds.md)。这是个人版本入口，不应将文件复制覆盖到官方安装目录。
+
+旧的独立 Windows 目录包入口 `Start pi-gui proxy build.lnk` 仅保留作历史记录；它调用同目录的 `Start pi-gui proxy build.cmd`，启动脚本仅将 Electron `userData` 指向 `%LOCALAPPDATA%\pi-gui-proxy-build`，保留默认 Pi agent 目录与 settings 配置。它不是当前个人版本的启动入口。NSIS 安装器和 portable 包可能与其他安装共享应用身份，应在核对应用身份、数据目录后再考虑使用。
 
 当前主进程将 Electron `userData` 默认设为 `pi`，可通过 `PI_APP_USER_DATA_DIR` 改到专用目录；这可隔离 pi-gui 的应用数据。Pi provider 设置、模型目录及认证由 Pi agent 目录管理，默认仍与 Pi CLI 共用 `~/.pi/agent`。如需完全隔离运行，应在启动目录包的专用快捷方式环境中设置独立 `PI_CODING_AGENT_DIR`，并在该目录建立独立 `settings.json`；不要复制认证文件。两个隔离变量都要在启动进程环境中设置。确认目标快捷方式指向独立目录包后，再进行启动验证。
 
@@ -64,8 +68,8 @@ pnpm exec node scripts/package-windows.mjs --win --dir --publish never --config.
 
 - Pi 0.87.1 的 `dist/auth/oauth/openai-codex.js`：`fetchWithLoginCancellation()`、`exchangeAuthorizationCode()`、`refreshAccessToken()` 分别在 85–94、112–125、127–145 行使用全局 `fetch`。
 - Pi 0.87.1 的 `dist/api/openai-codex-responses.js`：733–736 行在非 Bun runtime 读取 `globalThis.WebSocket`，795 行创建 socket。
-- pi-gui 的 `apps/desktop/electron/main.ts`：815–833 行在 runtime 创建前初始化代理。
+- pi-gui 的 `apps/desktop/electron/main.ts`：`app.whenReady()` 启动回调在创建 provider runtime 前初始化代理；失败时显示可打开 Pi settings 或退出的对话框。
 - pi-gui 的 `apps/desktop/electron/network/provider-model-probe.ts`：默认 fetch 参数为 `globalThis.fetch`。
 - pi-gui 的 `apps/desktop/electron/platform/update-checker.ts`：59 行使用 Electron `net.fetch`；`electron-builder.yml` 122–125 行声明 GitHub 发布目标，但检查器只查询 releases 并打开页面。
-- pi-gui 的 `apps/desktop/electron/main.ts`：791–794 行将应用名设为 `pi` 并设置 `userData`，可选读取 `PI_APP_USER_DATA_DIR`。
+- pi-gui 的 `apps/desktop/electron/main.ts`：应用启动配置将应用名设为 `pi` 并设置 `userData`，可选读取 `PI_APP_USER_DATA_DIR`。
 - Pi 0.87.1 的 `dist/config.js`：405–426 行公开的 `getAgentDir()` 使用 `PI_CODING_AGENT_DIR`，缺省目录为用户 home 下 Pi 配置目录。
