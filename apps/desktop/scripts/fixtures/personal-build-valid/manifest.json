@@ -1,0 +1,8 @@
+{
+  "id": "9.9.9-proxy.9",
+  "appVersion": "9.9.9",
+  "buildLabel": "synthetic",
+  "bundleHash": "7c6fb4e113662ca5d6242aa95a754d2fae341cb1f2c26703fd060f3ca8a333fc",
+  "baselineCommit": "fixture",
+  "source": "checked-in synthetic fixture"
+}
