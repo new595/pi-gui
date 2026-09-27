@@ -131,41 +131,43 @@ test("selects and restores theme presets", async () => {
   }
 });
 
-test("every preset recolours the same design instead of restyling it", async () => {
-  const userDataDir = await makeUserDataDir();
-  const workspacePath = await makeWorkspace("appearance-one-design");
-  const harness = await launchDesktop(userDataDir, {
-    initialWorkspaces: [workspacePath],
-    testMode: "background",
-  });
+test.describe("every preset recolours the same design instead of restyling it", () => {
+  for (const variant of ["light", "dark"] as const) {
+    for (const preset of themePresets) {
+      test(`${preset.name} in ${variant} recolours the same surfaces`, async () => {
+        const userDataDir = await makeUserDataDir();
+        const workspacePath = await makeWorkspace(`appearance-${preset.id}-${variant}`);
+        const harness = await launchDesktop(userDataDir, {
+          initialWorkspaces: [workspacePath],
+          testMode: "background",
+        });
 
-  try {
-    const window = await harness.firstWindow();
-    await waitForWorkspaceByPath(window, workspacePath);
-    await createNamedThread(window, "Preset assertion thread");
-    await seedTranscriptMessages(harness, window, {
-      count: 1,
-      textFactory: () =>
-        'Preset assertion surface with `inline code`.\n\n```ts\nconst surface = "workbench";\n```',
-    });
-    await expect(window.getByTestId("transcript")).toContainText("inline code");
+        try {
+          const window = await harness.firstWindow();
+          await waitForWorkspaceByPath(window, workspacePath);
+          await createNamedThread(window, "Preset assertion thread");
+          await seedTranscriptMessages(harness, window, {
+            count: 1,
+            textFactory: () =>
+              'Preset assertion surface with `inline code`.\n\n```ts\nconst surface = "workbench";\n```',
+          });
+          await expect(window.getByTestId("transcript")).toContainText("inline code");
 
-    for (const variant of ["light", "dark"] as const) {
-      for (const preset of themePresets) {
-        await openAppearance(window);
-        await window
-          .getByRole("radio", { name: variant === "light" ? "Light" : "Dark", exact: true })
-          .click();
-        await selectThemePreset(window, preset.name);
-        await expect(window.getByLabel("Color preset")).toHaveValue(preset.id);
-        await expectDerivedTokens(window, preset.id, variant);
-        await window.getByRole("button", { name: "Back to app" }).click();
-        await expect(window.locator(".main")).toBeVisible();
-        await expectSameDesign(window);
-      }
+          await openAppearance(window);
+          await window
+            .getByRole("radio", { name: variant === "light" ? "Light" : "Dark", exact: true })
+            .click();
+          await selectThemePreset(window, preset.name);
+          await expect(window.getByLabel("Color preset")).toHaveValue(preset.id);
+          await expectDerivedTokens(window, preset.id, variant);
+          await window.getByRole("button", { name: "Back to app" }).click();
+          await expect(window.locator(".main")).toBeVisible();
+          await expectSameDesign(window);
+        } finally {
+          await harness.close();
+        }
+      });
     }
-  } finally {
-    await harness.close();
   }
 });
 
