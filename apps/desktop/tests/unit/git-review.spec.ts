@@ -284,14 +284,18 @@ test("uses configured remote HEAD and reports missing or unrelated branch bases"
 test("makes binary, deleted, empty, conflict, and submodule coverage explicit", async () => {
   const cwd = await repository();
   await writeFile(join(cwd, "binary.dat"), Buffer.from([1, 0, 2]));
+  await writeFile(join(cwd, "added.txt"), "new addition\n");
   await writeFile(join(cwd, "empty.txt"), "");
   await unlink(join(cwd, "file.txt"));
   let review = await uncommitted(cwd);
   const binary = (await fileContent(review, "binary.dat")).result;
   expect(binary.coverage).toMatchObject({ state: "partial" });
   expect(binary.coverage.notes.join(" ")).toContain("Binary");
+  expect((await fileContent(review, "added.txt")).result.patch).toContain("+new addition");
   expect((await fileContent(review, "empty.txt")).result.patch).toContain("new file mode");
-  expect((await fileContent(review, "file.txt")).result.patch).toContain("deleted file mode");
+  const deleted = (await fileContent(review, "file.txt")).result.patch;
+  expect(deleted).toContain("deleted file mode");
+  expect(deleted).toContain("-base");
   const subOid = (await git(cwd, "rev-parse", "HEAD")).trim();
   await git(cwd, "update-index", "--add", "--cacheinfo", `160000,${subOid},nested`);
   await mkdir(join(cwd, "nested"));

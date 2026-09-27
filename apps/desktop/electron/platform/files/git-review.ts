@@ -12,7 +12,7 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { devNull, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type {
   ChangeReviewFileStageResult,
@@ -36,6 +36,9 @@ const PREPARATION_MS = 10_000;
 /** Pathspec bytes per Git call, well below Windows' 32K command-line limit. */
 const MAX_PATHSPEC_BYTES = 24_000;
 const COMPLETE: ReviewCoverage = { state: "complete", notes: [] };
+// Git accepts this cross-platform sentinel for `diff --no-index`; Node's Windows
+// `os.devNull` value (`\\.\nul`) is not a path Git can open in this invocation.
+const GIT_NULL_DEVICE = "/dev/null";
 
 export interface GitReviewLimits {
   /** Output cap for one Git listing; larger output makes the review unavailable. */
@@ -963,7 +966,7 @@ async function readPatch(
   const scratch = await mkdtemp(join(tmpdir(), "pi-gui-review-"));
   try {
     const materialize = async (side: string, name: string, file: WorkingFile) => {
-      if (file.mode === "missing") return devNull;
+      if (file.mode === "missing") return GIT_NULL_DEVICE;
       const relative = `${side}/${name}`;
       const target = safePath(scratch, relative);
       await mkdir(dirname(target), { recursive: true });
@@ -982,6 +985,14 @@ async function readPatch(
       MAX_PATCH_BYTES,
     );
     const patch = result.stdout.toString("utf8");
+    // `diff --no-index` uses exit code 1 for a valid difference, but a failed
+    // null-device open can also return 1 with empty stdout. Do not report that
+    // as an available empty patch.
+    if (
+      !result.truncated &&
+      ((result.code !== 0 && result.code !== 1) || (result.code === 1 && patch.length === 0))
+    )
+      throw new Error("Git could not generate the review patch.");
     const notes: string[] = [];
     if (result.truncated) notes.push("Patch is truncated at the 1 MiB review limit.");
     if (
