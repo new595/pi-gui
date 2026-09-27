@@ -60,9 +60,9 @@ test(`General renders the real startup proxy snapshot without exposing credentia
     await expect(section).toContainText(expectedLabel);
     await expect(section.getByText(/^\d+\.\d+\.\d+/)).toBeVisible();
     await expect(section).toContainText("quit and restart");
-    const screenshotPath = resolve(
-      `.artifacts/proxy-phase2/proxy-status-general-${PACKAGED ? "packaged" : "final"}.png`,
-    );
+    const screenshotPath = test
+      .info()
+      .outputPath(`proxy-status-general-${PACKAGED ? "packaged" : "final"}.png`);
     await mkdir(dirname(screenshotPath), { recursive: true });
     await explicit.window.screenshot({ path: screenshotPath, fullPage: false });
 
