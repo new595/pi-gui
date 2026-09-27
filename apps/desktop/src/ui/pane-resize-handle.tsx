@@ -32,6 +32,7 @@ export function PaneResizeHandle({
   const boundsRef = useRef(bounds);
   boundsRef.current = bounds;
   const [size, setSize] = useState({ width: 0, min: 0, max: 0 });
+  const sizeRef = useRef(size);
   const [resizing, setResizing] = useState(false);
 
   useEffect(() => {
@@ -40,11 +41,13 @@ export function PaneResizeHandle({
     if (!pane || !container) return;
     const measure = () => {
       const { min, max } = boundsRef.current(pane, container);
-      setSize({
+      const next = {
         width: Math.round(pane.getBoundingClientRect().width),
         min: Math.min(min, max),
         max,
-      });
+      };
+      sizeRef.current = next;
+      setSize(next);
     };
     const observer = new ResizeObserver(measure);
     observer.observe(pane);
@@ -54,7 +57,15 @@ export function PaneResizeHandle({
   }, []);
 
   const widen = edge === "right" ? 1 : -1;
-  const resize = (width: number) => onResize(Math.max(size.min, Math.min(size.max, width)));
+  const resize = (width: number) => {
+    const current = sizeRef.current;
+    const next = Math.max(current.min, Math.min(current.max, width));
+    // Keep sequential key presses based on the requested width while the browser is
+    // still applying the previous resize and ResizeObserver has not measured it yet.
+    sizeRef.current = { ...current, width: next };
+    setSize(sizeRef.current);
+    onResize(next);
+  };
   return (
     <div
       ref={ref}
@@ -93,9 +104,9 @@ export function PaneResizeHandle({
       onKeyDown={(event) => {
         const next =
           event.key === "ArrowRight"
-            ? size.width + widen * 20
+            ? sizeRef.current.width + widen * 20
             : event.key === "ArrowLeft"
-              ? size.width - widen * 20
+              ? sizeRef.current.width - widen * 20
               : event.key === "Home"
                 ? size.min
                 : event.key === "End"
