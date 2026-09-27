@@ -610,6 +610,20 @@ export function DiffIcon() {
   );
 }
 
+export function FileDiffIcon() {
+  return (
+    <Icon>
+      <rect x="4" y="3.5" width="12" height="13" rx="2.5" stroke="currentColor" strokeWidth="1.3" />
+      <path
+        d="M10 6.5v4M8 8.5h4M8 13.5h4"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeWidth="1.3"
+      />
+    </Icon>
+  );
+}
+
 export function ChatIcon() {
   return (
     <Icon>
@@ -697,6 +711,24 @@ export function PlugIcon() {
         strokeLinejoin="round"
         strokeWidth="1.35"
       />
+    </Icon>
+  );
+}
+
+export function MoreIcon() {
+  return (
+    <Icon>
+      <circle cx="5" cy="10" r="1.25" fill="currentColor" />
+      <circle cx="10" cy="10" r="1.25" fill="currentColor" />
+      <circle cx="15" cy="10" r="1.25" fill="currentColor" />
+    </Icon>
+  );
+}
+
+export function MinusIcon() {
+  return (
+    <Icon>
+      <path d="M4.25 10h11.5" stroke="currentColor" strokeLinecap="round" strokeWidth="1.7" />
     </Icon>
   );
 }

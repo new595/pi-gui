@@ -168,13 +168,15 @@ test("a queued-input transition shares one capture and pins exact transcript ent
     signal,
   );
   const target = { workspaceId: "repo", sessionId: "task" };
-  expect(await store.resolveTurn({ target, messageId: "assistant-first" })).toEqual({
-    state: "available",
-    checkpointId: "first",
-  });
-  expect(await store.resolveTurn({ target, messageId: "unrelated" })).toMatchObject({
-    state: "unavailable",
-  });
+  expect(
+    (await store.listTurns(target)).map(({ checkpointId, entryIds }) => ({
+      checkpointId,
+      entryIds,
+    })),
+  ).toEqual([
+    { checkpointId: "first", entryIds: ["user-first", "assistant-first"] },
+    { checkpointId: "second", entryIds: ["user-second", "assistant-second"] },
+  ]);
   expect(await store.resolve({ target, checkoutId: "repo" })).toMatchObject({
     state: "available",
     checkpointId: "second",
@@ -221,6 +223,24 @@ test("linked worktree captures preserve the source pointer, per-worktree index a
   expect(await readdir(join(workspace, ".git", "objects"), { recursive: true })).toEqual(
     objectsBefore,
   );
+});
+
+test("an untracked nested repository is skipped with a coverage note instead of failing capture", async () => {
+  const { workspace, store } = await fixture();
+  await writeFile(join(workspace, "tracked.txt"), "tracked\n");
+  await git(workspace, ["add", "tracked.txt"]);
+  await git(workspace, ["commit", "-m", "initial"]);
+  const nested = join(workspace, "vendor-repo");
+  await mkdir(nested);
+  await git(nested, ["init", "--template=", "--initial-branch=main"]);
+  await writeFile(join(nested, "inner.txt"), "inner\n");
+  await writeFile(join(workspace, "loose.txt"), "loose\n");
+
+  const capture = await store.capture(workspace);
+  available(capture);
+  expect(capture.fileCount).toBe(2);
+  expect(capture.coverage.state).toBe("partial");
+  expect(capture.coverage.notes.join(" ")).toMatch(/nested git repositories/i);
 });
 
 test("private batching handles spaces and newlines in storage roots and source filenames", async () => {

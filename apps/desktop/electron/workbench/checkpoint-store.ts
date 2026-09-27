@@ -140,6 +140,11 @@ export interface ResolvedTurnCheckpoint {
   readonly coverage: ReviewCoverage;
 }
 
+export interface ListedTurnCheckpoint extends ResolvedTurnCheckpoint {
+  /** Transcript entries of the turn, so a view can place it in the conversation. */
+  readonly entryIds: readonly string[];
+}
+
 /** Owns immutable snapshot objects and small interval metadata, never the user's Git state. */
 export class TurnCheckpointStore {
   readonly repositoryPath: string;
@@ -380,70 +385,22 @@ export class TurnCheckpointStore {
         "No captured turn exists for this task and checkout.",
       );
     }
-    if (
-      record.outcome === "open" ||
-      record.before.state !== "available" ||
-      record.after?.state !== "available"
-    ) {
-      const failed = record.before.state === "unavailable" ? record.before : record.after;
-      return unavailableReview(
-        "checkpoint-incomplete",
-        failed?.state === "unavailable"
-          ? failed.message
-          : "This turn does not have complete before and after captures.",
-      );
-    }
-    const notes = [...record.before.coverage.notes, ...record.after.coverage.notes];
-    if (record.outcome !== "completed")
-      notes.push(`This interval ended ${record.outcome}; it is not a completed turn.`);
-    if (record.overlaps.length)
-      notes.push(
-        `Other runs overlapped this interval in the same checkout (${record.overlaps.length}). Changes cannot be attributed to this agent alone.`,
-      );
-    return {
-      state: "available",
-      checkpointId: record.checkpointId,
-      checkoutId: record.checkoutId,
-      repositoryPath: this.repositoryPath,
-      beforeTreeOid: record.before.treeOid,
-      afterTreeOid: record.after.treeOid,
-      capturedAt: record.after.capturedAt,
-      coverage: { state: notes.length ? "partial" : "complete", notes: [...new Set(notes)] },
-    };
+    return resolveRecord(this.repositoryPath, record);
   }
 
-  async resolveTurn(input: {
-    target: SessionRef;
-    messageId: string;
-  }): Promise<{ state: "available"; checkpointId: string } | ReviewIssue> {
-    let records: readonly StoredTurnCheckpoint[];
-    try {
-      records = await this.list(input.target);
-    } catch {
-      return unavailableReview(
-        "checkpoint-storage-unavailable",
-        "Checkpoint metadata could not be read.",
-      );
-    }
-    const record = records.find(
-      (candidate) =>
-        candidate.userEntryIds.includes(input.messageId) ||
-        candidate.assistantEntryIds.includes(input.messageId) ||
-        candidate.lastEntryId === input.messageId,
-    );
-    if (!record)
-      return unavailableReview(
-        "checkpoint-message-unavailable",
-        "This message has no captured turn.",
-      );
-    const result = await this.resolve({
-      target: input.target,
-      checkoutId: record.checkoutId,
-      checkpointId: record.checkpointId,
+  /** Every finished turn of a task whose before and after captures are both usable. */
+  async listTurns(target: SessionRef): Promise<readonly ListedTurnCheckpoint[]> {
+    const records = await this.list(target);
+    return records.flatMap((record) => {
+      const resolved = resolveRecord(this.repositoryPath, record);
+      if (resolved.state !== "available") return [];
+      const entryIds = [
+        ...record.userEntryIds,
+        ...record.assistantEntryIds,
+        ...(record.lastEntryId ? [record.lastEntryId] : []),
+      ];
+      return [{ ...resolved, entryIds: [...new Set(entryIds)] }];
     });
-    return result.state === "available"
-      ? { state: "available", checkpointId: result.checkpointId }
-      : result;
   }
 
   async capture(
@@ -548,7 +505,13 @@ export class TurnCheckpointStore {
           );
         paths.add(match[5]!);
       }
-      for (const path of nulRecords(otherOutput)) paths.add(path);
+      // Git lists an untracked nested repository (or linked worktree) as one "dir/" entry.
+      // Its files belong to that repository, so the capture skips it and says so.
+      let skippedNestedRepository = false;
+      for (const path of nulRecords(otherOutput)) {
+        if (path.endsWith("/")) skippedNestedRepository = true;
+        else paths.add(path);
+      }
       if (paths.size > this.limits.maxFiles)
         throw new CaptureError(
           "file-limit",
@@ -697,7 +660,9 @@ export class TurnCheckpointStore {
         state: "available",
         treeOid,
         capturedAt: new Date().toISOString(),
-        coverage: { state: "complete", notes: [] },
+        coverage: skippedNestedRepository
+          ? { state: "partial", notes: [NESTED_REPOSITORY_NOTE] }
+          : { state: "complete", notes: [] },
         fileCount,
         byteCount,
         durationMs: Date.now() - started,
@@ -1171,6 +1136,9 @@ function sameTarget(left: SessionRef, right: SessionRef): boolean {
   return left.workspaceId === right.workspaceId && left.sessionId === right.sessionId;
 }
 
+const NESTED_REPOSITORY_NOTE =
+  "Nested Git repositories inside this checkout are not included in turn captures.";
+
 function unavailableCapture(code: string, message: string): CheckpointCapture {
   return {
     state: "unavailable",
@@ -1181,6 +1149,42 @@ function unavailableCapture(code: string, message: string): CheckpointCapture {
     fileCount: 0,
     byteCount: 0,
     durationMs: 0,
+  };
+}
+
+function resolveRecord(
+  repositoryPath: string,
+  record: StoredTurnCheckpoint,
+): ResolvedTurnCheckpoint | ReviewIssue {
+  if (
+    record.outcome === "open" ||
+    record.before.state !== "available" ||
+    record.after?.state !== "available"
+  ) {
+    const failed = record.before.state === "unavailable" ? record.before : record.after;
+    return unavailableReview(
+      "checkpoint-incomplete",
+      failed?.state === "unavailable"
+        ? failed.message
+        : "This turn does not have complete before and after captures.",
+    );
+  }
+  const notes = [...record.before.coverage.notes, ...record.after.coverage.notes];
+  if (record.outcome !== "completed")
+    notes.push(`This interval ended ${record.outcome}; it is not a completed turn.`);
+  if (record.overlaps.length)
+    notes.push(
+      `Other runs overlapped this interval in the same checkout (${record.overlaps.length}). Changes cannot be attributed to this agent alone.`,
+    );
+  return {
+    state: "available",
+    checkpointId: record.checkpointId,
+    checkoutId: record.checkoutId,
+    repositoryPath,
+    beforeTreeOid: record.before.treeOid,
+    afterTreeOid: record.after.treeOid,
+    capturedAt: record.after.capturedAt,
+    coverage: { state: notes.length ? "partial" : "complete", notes: [...new Set(notes)] },
   };
 }
 

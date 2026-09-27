@@ -29,8 +29,8 @@ import type { DesktopProxyStatus } from "../contracts/proxy-status";
 import type { ClipboardImageRead } from "../contracts/composer-attachments";
 import type { SaveTaskWorkbenchTemplateInput, TaskWorkbenchTemplate } from "../contracts/workbench";
 import type {
-  ResolveTurnReviewInput,
-  ResolveTurnReviewResult,
+  TurnChangesInput,
+  TurnChangesResult,
   GetReviewInput,
   ReviewResult,
   ReviewFileInput,
@@ -127,8 +127,8 @@ contextBridge.exposeInMainWorld("piApp", {
     subscribeIpc(desktopIpc.extensionViewCatalogChanged, listener),
   onExtensionViewOpenFile: (listener: (event: ExtensionViewOpenFile) => void) =>
     subscribeIpc(desktopIpc.extensionViewOpenFile, listener),
-  resolveTurnReview: (input: ResolveTurnReviewInput) =>
-    ipcRenderer.invoke(desktopIpc.resolveTurnReview, input) as Promise<ResolveTurnReviewResult>,
+  getTurnChanges: (input: TurnChangesInput) =>
+    ipcRenderer.invoke(desktopIpc.getTurnChanges, input) as Promise<TurnChangesResult>,
   getReview: (input: GetReviewInput) =>
     ipcRenderer.invoke(desktopIpc.getReview, input) as Promise<ReviewResult>,
   getReviewFile: (input: ReviewFileInput) =>
@@ -549,6 +549,7 @@ contextBridge.exposeInMainWorld("piApp", {
     ipcRenderer.invoke(desktopIpc.getResolvedTheme) as Promise<"light" | "dark">,
   setThemeMode: (mode: "system" | "light" | "dark") =>
     ipcRenderer.invoke(desktopIpc.setThemeMode, mode) as Promise<DesktopAppState>,
+  onWindowFocused: (listener: () => void) => subscribeIpc(desktopIpc.windowFocused, listener),
   onThemeChanged: (callback: (theme: "light" | "dark") => void) => {
     const handler = (_event: Electron.IpcRendererEvent, theme: "light" | "dark") => callback(theme);
     ipcRenderer.on(desktopIpc.themeChanged, handler);

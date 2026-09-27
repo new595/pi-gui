@@ -10,16 +10,20 @@ import type {
   ReviewFileResult,
   ReviewIssue,
   ReviewResult,
-  ResolveTurnReviewInput,
-  ResolveTurnReviewResult,
   SetReviewFileReviewedInput,
   SetReviewFileReviewedResult,
+  TurnChangedFile,
+  TurnChangeSummary,
+  TurnChangesInput,
+  TurnChangesResult,
 } from "../../contracts/review";
+import { isWorkingReviewScope } from "../../contracts/review";
 import {
   changeGitReviewFileStage,
   checkGitReviewFileCurrent,
   createGitReview,
   readGitReviewFile,
+  summarizeGitTreeChanges,
   type GitReviewFile,
   type GitReviewScope,
   type GitReviewSnapshot,
@@ -44,7 +48,11 @@ export interface ReviewCheckpointSource {
     readonly checkoutId: string;
     readonly checkpointId?: string;
   }): Promise<ReviewCheckpoint | ReviewIssue>;
-  resolveTurn?(input: ResolveTurnReviewInput): Promise<ResolveTurnReviewResult>;
+  listTurns?(target: SessionRef): Promise<readonly ListedTurn[]>;
+}
+
+export interface ListedTurn extends ReviewCheckpoint {
+  readonly entryIds: readonly string[];
 }
 
 export interface ReviewOwnerOptions {
@@ -63,29 +71,64 @@ interface OwnedReview {
 }
 
 const MAX_RETAINED_REVIEWS = 16;
+/** Captured trees never change, so a turn's summary is computed once. */
+const MAX_CACHED_TURN_SUMMARIES = 500;
 
 /** Main owns comparison identities and reviewed state; the Git adapter owns Git semantics. */
 export class ReviewOwner {
   private readonly reviews = new Map<string, OwnedReview>();
   private readonly reviewed: ReviewedStore;
   private readonly mutations = new Map<string, Promise<void>>();
+  private readonly turnFiles = new Map<string, Promise<readonly TurnChangedFile[]>>();
 
   constructor(private readonly options: ReviewOwnerOptions) {
     this.reviewed = new ReviewedStore(options.userDataDir);
   }
 
-  async resolveTurnReview(input: ResolveTurnReviewInput): Promise<ResolveTurnReviewResult> {
+  async getTurnChanges(input: TurnChangesInput): Promise<TurnChangesResult> {
     try {
       if (!this.options.validateTask(input.target)) {
         return unavailable("task-unavailable", "This task is unavailable.");
       }
-      if (!this.options.checkpoints?.resolveTurn) {
-        return unavailable("checkpoint-unavailable", "No capture exists for this message.");
-      }
-      return await this.options.checkpoints.resolveTurn(input);
+      const turns = (await this.options.checkpoints?.listTurns?.(input.target)) ?? [];
+      const summaries = await Promise.all(
+        turns.map(async (turn): Promise<TurnChangeSummary | null> => {
+          try {
+            return {
+              checkpointId: turn.checkpointId,
+              checkoutId: turn.checkoutId,
+              entryIds: turn.entryIds,
+              files: await this.turnChangedFiles(turn),
+            };
+          } catch {
+            // One unreadable capture drops only its own card; its Review still reports why.
+            return null;
+          }
+        }),
+      );
+      return {
+        state: "available",
+        turns: summaries.filter((turn): turn is TurnChangeSummary => Boolean(turn?.files.length)),
+      };
     } catch (error: unknown) {
       return failed(error);
     }
+  }
+
+  private turnChangedFiles(turn: ListedTurn): Promise<readonly TurnChangedFile[]> {
+    let files = this.turnFiles.get(turn.checkpointId);
+    if (!files) {
+      files = summarizeGitTreeChanges(turn.repositoryPath, turn.beforeTreeOid, turn.afterTreeOid);
+      // A failed read is retried on the next request instead of being remembered.
+      files.catch(() => this.turnFiles.delete(turn.checkpointId));
+      this.turnFiles.set(turn.checkpointId, files);
+      while (this.turnFiles.size > MAX_CACHED_TURN_SUMMARIES) {
+        const oldest = this.turnFiles.keys().next().value;
+        if (oldest === undefined) break;
+        this.turnFiles.delete(oldest);
+      }
+    }
+    return files;
   }
 
   async getReview(input: GetReviewInput): Promise<ReviewResult> {
@@ -156,11 +199,15 @@ export class ReviewOwner {
         files: snapshot.files.map((file) => ({
           id: file.id,
           path: file.path,
-          ...(file.previousPath === undefined ? {} : { previousPath: file.previousPath }),
+          // An unstaged change is shown at its current path, so it reports no rename.
+          ...(file.previousPath === undefined || snapshot.scope.kind === "unstaged"
+            ? {}
+            : { previousPath: file.previousPath }),
           status: file.status,
           hasStagedChanges: file.hasStagedChanges,
           hasUnstagedChanges: file.hasUnstagedChanges,
           conflicted: file.conflicted,
+          lines: file.lines,
           reviewed: marks.has(markKey(owned, file)),
         })),
       };
@@ -209,12 +256,12 @@ export class ReviewOwner {
       const resolved = await this.resolveFile(input);
       if (isIssue(resolved)) return resolved;
       if (
-        resolved.review.snapshot.scope.kind !== "uncommitted" ||
+        !isWorkingReviewScope(resolved.review.snapshot.scope) ||
         resolved.review.checkoutPath === null
       ) {
         return unavailable(
           "read-only-comparison",
-          "Staging is available only for Uncommitted changes.",
+          "Staging is available only for Uncommitted, Staged and Unstaged changes.",
         );
       }
       return await this.withMutation(resolved.review.checkoutPath, async () => {

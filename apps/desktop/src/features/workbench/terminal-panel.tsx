@@ -6,12 +6,15 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
 import type { WorkspaceRecord } from "../../../contracts/desktop-state";
 import { CloseIcon, PlusIcon, RefreshIcon } from "../../ui/icons";
+import { getSidePanelTabCommand } from "../../../contracts/ipc";
 import type {
   TerminalPanelSnapshot,
   TerminalSessionSnapshot,
   TerminalSize,
 } from "../../../contracts/ipc";
 import { appendTerminalReplay } from "../../../contracts/terminal-model";
+import { getActiveTheme, useActiveTheme } from "../../ui/active-theme";
+import { terminalThemeFor } from "./terminal-theme";
 
 interface TerminalPanelProps {
   readonly workspace: WorkspaceRecord;
@@ -30,6 +33,12 @@ export function TerminalPanel({ workspace, sessionId, onHide }: TerminalPanelPro
   const lastSizeRef = useRef<TerminalSize>({ cols: 80, rows: 24 });
   const [panel, setPanel] = useState<TerminalPanelSnapshot | null>(null);
   const [error, setError] = useState<string>("");
+  const activeTheme = useActiveTheme();
+
+  useEffect(() => {
+    const terminal = terminalRef.current;
+    if (terminal) terminal.options.theme = terminalThemeFor(activeTheme);
+  }, [activeTheme]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -212,12 +221,7 @@ export function TerminalPanel({ workspace, sessionId, onHide }: TerminalPanelPro
       fontFamily: "Menlo, Monaco, Consolas, 'Liberation Mono', monospace",
       fontSize: 12,
       scrollback: 2_000,
-      theme: {
-        background: "#0f1117",
-        foreground: "#d7dae0",
-        cursor: "#f2f4f8",
-        selectionBackground: "#39557a",
-      },
+      theme: terminalThemeFor(getActiveTheme()),
     });
     const fitAddon = new FitAddon();
     const clipboardAddon = new ClipboardAddon();
@@ -233,6 +237,19 @@ export function TerminalPanel({ workspace, sessionId, onHide }: TerminalPanelPro
     terminal.attachCustomKeyEventHandler((event) => {
       if (event.type !== "keydown") {
         return true;
+      }
+      if (
+        getSidePanelTabCommand(api.platform, {
+          meta: event.metaKey,
+          control: event.ctrlKey,
+          alt: event.altKey,
+          shift: event.shiftKey,
+          key: event.key,
+          code: event.code,
+        })
+      ) {
+        // Side panel tab chords switch tabs; the shell never sees them.
+        return false;
       }
       const commandModifier = api.platform === "darwin" ? event.metaKey : event.ctrlKey;
       const key = event.key.toLowerCase();

@@ -75,7 +75,7 @@ test("syntax-highlights known languages and leaves unknown extensions plain", as
   test.setTimeout(45_000);
   const { harness, window } = await launchSeeded("Review UX highlight");
   try {
-    await selectSidePanel(window, "Changes");
+    await selectSidePanel(window, "Review");
     const diffPanel = window.locator(".diff-panel");
     await expect(diffPanel).toBeVisible();
 
@@ -83,32 +83,30 @@ test("syntax-highlights known languages and leaves unknown extensions plain", as
     await expect(tsRow).toBeVisible();
     await tsRow.locator(".diff-panel__file-name").click();
     const tsDiff = diffPanel
-      .getByRole("region", { name: "Combined changes", exact: true })
+      .getByRole("region", { name: "Diff", exact: true })
       .locator(".diff-inline");
     await expect(tsDiff).toHaveAttribute("data-language", "typescript");
-    await expect(tsDiff.locator('[class*="hljs-"]').first()).toBeVisible();
+    await expect(tsDiff.locator('span[style*="color"]').first()).toBeVisible();
 
     const pyRow = diffPanel.locator('.diff-panel__file[data-file-path="script.py"]');
     await pyRow.locator(".diff-panel__file-name").click();
     await expect(
-      diffPanel
-        .getByRole("region", { name: "Combined changes", exact: true })
-        .locator(".diff-inline"),
+      diffPanel.getByRole("region", { name: "Diff", exact: true }).locator(".diff-inline"),
     ).toHaveAttribute("data-language", "python");
     await expect(
       diffPanel
-        .getByRole("region", { name: "Combined changes", exact: true })
-        .locator('.diff-inline [class*="hljs-"]')
+        .getByRole("region", { name: "Diff", exact: true })
+        .locator('.diff-inline span[style*="color"]')
         .first(),
     ).toBeVisible();
 
     const mdRow = diffPanel.locator('.diff-panel__file[data-file-path="notes.md"]');
     await mdRow.locator(".diff-panel__file-name").click();
     const mdDiff = diffPanel
-      .getByRole("region", { name: "Combined changes", exact: true })
+      .getByRole("region", { name: "Diff", exact: true })
       .locator(".diff-inline");
     await expect(mdDiff).not.toHaveAttribute("data-language", /.*/);
-    await expect(mdDiff.locator('[class*="hljs-"]')).toHaveCount(0);
+    await expect(mdDiff.locator('span[style*="color"]')).toHaveCount(0);
   } finally {
     await harness.close();
   }
@@ -133,7 +131,7 @@ test("reviewed marks survive relaunch and apply only to the reviewed file revisi
       value: legacyValue,
     });
 
-    await selectSidePanel(firstWindow, "Changes");
+    await selectSidePanel(firstWindow, "Review");
     const diffPanel = firstWindow.locator(".diff-panel");
     await expect(diffPanel).toBeVisible();
     await expect(diffPanel.locator(".diff-panel__file")).toHaveCount(3);
@@ -164,7 +162,7 @@ test("reviewed marks survive relaunch and apply only to the reviewed file revisi
   const window = await reopened.firstWindow();
   try {
     await expect(window.locator(".chat-header__title")).toBeVisible();
-    await selectSidePanel(window, "Changes");
+    await selectSidePanel(window, "Review");
     const reopenedPanel = window.locator(".diff-panel");
     await expect(reopenedPanel).toBeVisible();
     await expect(reopenedPanel.getByTestId("diff-panel-counter")).toHaveText("Reviewed 2 of 3");
@@ -194,23 +192,43 @@ test("reviewed marks survive relaunch and apply only to the reviewed file revisi
   }
 });
 
+test("a new file at a renamed file's old path can be marked reviewed", async () => {
+  test.setTimeout(45_000);
+  const { harness, window, workspacePath } = await launchSeeded("Review UX rename");
+  try {
+    await execFileAsync("git", ["mv", "notes.md", "renamed.md"], { cwd: workspacePath });
+    await writeFile(join(workspacePath, "notes.md"), "# a new notes file\n", "utf8");
+    await selectSidePanel(window, "Review");
+    const diffPanel = window.locator(".diff-panel");
+    await expect(diffPanel).toBeVisible();
+    await diffPanel.locator('button[aria-label="Refresh"]').click();
+    const recreated = diffPanel.getByTestId("diff-panel-reviewed-notes.md");
+    await expect(recreated).toBeVisible();
+    await recreated.click();
+    await expect(recreated).toBeChecked();
+    await expect(diffPanel.locator('.diff-panel__file[data-file-path="notes.md"]')).toHaveClass(
+      /diff-panel__file--reviewed/,
+    );
+  } finally {
+    await harness.close();
+  }
+});
+
 test("Files mode shows a file browser and reader instead of the changes reviewer", async () => {
   test.setTimeout(45_000);
   const { harness, window } = await launchSeeded("Review UX files mode");
   try {
-    await selectSidePanel(window, "Changes");
+    await selectSidePanel(window, "Review");
     const diffPanel = window.locator(".diff-panel");
     await expect(diffPanel).toBeVisible();
-    await expect(diffPanel.locator(".diff-panel__title")).toHaveText("Changes");
+    await expect(diffPanel).toHaveAttribute("aria-label", "Review");
     await expect(diffPanel.getByTestId("diff-panel-counter")).toHaveText("Reviewed 0 of 3");
 
     await diffPanel
       .locator('.diff-panel__file[data-file-path="src/foo.ts"] .diff-panel__file-name')
       .click();
     await expect(
-      diffPanel
-        .getByRole("region", { name: "Combined changes", exact: true })
-        .locator(".diff-inline"),
+      diffPanel.getByRole("region", { name: "Diff", exact: true }).locator(".diff-inline"),
     ).toBeVisible();
 
     await selectSidePanel(window, "Files");
@@ -283,9 +301,7 @@ test("view-in-changes button on a write tool row opens the diff panel without to
     const selectedRow = diffPanel.locator('.diff-panel__file[data-file-path="src/foo.ts"]');
     await expect(selectedRow).toHaveClass(/diff-panel__file--selected/);
     await expect(
-      diffPanel
-        .getByRole("region", { name: "Combined changes", exact: true })
-        .locator(".diff-inline"),
+      diffPanel.getByRole("region", { name: "Diff", exact: true }).locator(".diff-inline"),
     ).toHaveAttribute("data-language", "typescript");
 
     await toolHeader.click();
@@ -295,19 +311,19 @@ test("view-in-changes button on a write tool row opens the diff panel without to
   }
 });
 
-test("highlighting tokens swap palettes when the dark class flips", async () => {
+test("highlighting follows the theme when light or dark changes", async () => {
   test.setTimeout(45_000);
   const { harness, window } = await launchSeeded("Review UX theme");
   try {
-    await selectSidePanel(window, "Changes");
+    await selectSidePanel(window, "Review");
 
     const diffPanel = window.locator(".diff-panel");
     await diffPanel
       .locator('.diff-panel__file[data-file-path="src/foo.ts"] .diff-panel__file-name')
       .click();
     const token = diffPanel
-      .getByRole("region", { name: "Combined changes", exact: true })
-      .locator('.diff-inline [class*="hljs-"]')
+      .getByRole("region", { name: "Diff", exact: true })
+      .locator('.diff-inline span[style*="color"]')
       .first();
     await expect(token).toBeVisible();
 
@@ -316,12 +332,16 @@ test("highlighting tokens swap palettes when the dark class flips", async () => 
     );
     const colorBefore = await token.evaluate((el) => getComputedStyle(el).color);
 
-    await window.evaluate((wasDark) => {
-      document.documentElement.classList.toggle("dark", !wasDark);
+    await window.evaluate(async (wasDark) => {
+      await globalThis.window.piApp?.setThemeMode(wasDark ? "light" : "dark");
     }, initiallyDark);
 
-    const colorAfter = await token.evaluate((el) => getComputedStyle(el).color);
-    expect(colorAfter).not.toBe(colorBefore);
+    await expect
+      .poll(() => window.evaluate(() => document.documentElement.classList.contains("dark")))
+      .toBe(!initiallyDark);
+    await expect
+      .poll(() => token.evaluate((el) => getComputedStyle(el).color))
+      .not.toBe(colorBefore);
   } finally {
     await harness.close();
   }

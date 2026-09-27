@@ -6,7 +6,9 @@ import {
 } from "../../../contracts/desktop-state";
 import { SettingsSelect, SettingsSwitch } from "./settings-controls";
 import { SettingsGroup, SettingsRow } from "./settings-utils";
-import { themePresets } from "./theme-presets";
+import type { CSSProperties } from "react";
+import { themePreset, themePresets, themeSwatches, themeTokensFor } from "../../../contracts/theme";
+import { useActiveTheme } from "../../ui/active-theme";
 
 interface SettingsAppearanceSectionProps {
   readonly themeMode: ThemeMode;
@@ -35,11 +37,17 @@ export function SettingsAppearanceSection({
   interfaceZoom,
   onSetInterfaceZoom,
 }: SettingsAppearanceSectionProps) {
-  const activePreset = themePresets.find((preset) => preset.id === themePresetId);
+  const activePreset = themePreset(themePresetId);
+  const { variant } = useActiveTheme();
   return (
     <>
       <SettingsGroup title="Theme" plain>
-        <div aria-label="Theme" className="theme-mode-tiles" role="radiogroup">
+        <div
+          aria-label="Theme"
+          className="theme-mode-tiles"
+          role="radiogroup"
+          style={tilePalette(themePresetId)}
+        >
           {THEME_MODES.map((option) => (
             <label className="theme-mode-tile" key={option.mode}>
               <input
@@ -89,15 +97,13 @@ export function SettingsAppearanceSection({
       </SettingsGroup>
 
       <SettingsGroup>
-        <SettingsRow title="Color preset" description={activePreset?.description}>
+        <SettingsRow title="Color preset" description={activePreset.description}>
           <span className="settings-preset-control">
-            {activePreset ? (
-              <span aria-hidden="true" className="settings-preset-swatches">
-                {activePreset.swatches.map((swatch) => (
-                  <span key={swatch} style={{ background: swatch }} />
-                ))}
-              </span>
-            ) : null}
+            <span aria-hidden="true" className="settings-preset-swatches">
+              {themeSwatches(themePresetId, variant).map((swatch, index) => (
+                <span key={index} style={{ background: swatch }} />
+              ))}
+            </span>
             <SettingsSelect
               label="Color preset"
               options={themePresets.map((preset) => ({ value: preset.id, label: preset.name }))}
@@ -119,4 +125,17 @@ export function SettingsAppearanceSection({
       </SettingsGroup>
     </>
   );
+}
+
+function tilePalette(presetId: ThemePresetId): CSSProperties {
+  const light = themeTokensFor(presetId, "light");
+  const dark = themeTokensFor(presetId, "dark");
+  return {
+    "--tile-light-bg": light["--sidebar"],
+    "--tile-light-window": light["--main"],
+    "--tile-light-line": light["--line-strong"],
+    "--tile-dark-bg": dark["--sidebar"],
+    "--tile-dark-window": dark["--main"],
+    "--tile-dark-line": dark["--line-strong"],
+  } as CSSProperties;
 }

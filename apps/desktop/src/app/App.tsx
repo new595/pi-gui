@@ -18,6 +18,7 @@ import { useDesktopCommands } from "./use-desktop-commands";
 import { useRunningLabel } from "../features/conversation/hooks/use-running-label";
 import { useTimelineViewport } from "../features/conversation/hooks/use-timeline-viewport";
 import { buildDisplayTimelineItems } from "../features/conversation/timeline-turns";
+import { useTurnChanges } from "../features/conversation/hooks/use-turn-changes";
 import { formatRelativeTime } from "../lib/string-utils";
 import { restoreTopmostDialogFocus } from "../ui/dialog-focus";
 import { ComposerPanel } from "../features/conversation/composer-panel";
@@ -31,6 +32,7 @@ import {
 } from "../features/extensions/extension-view-panel";
 import { useExtensionViews } from "../features/extensions/use-extension-views";
 import { useExtensionHostActions } from "../features/extensions/use-extension-host-actions";
+import { useSidePanelTabHintsVisible } from "../features/workbench/side-panel-tab-hints";
 import { Workbench } from "../features/workbench/workbench";
 import { renderBuiltinToolPanel } from "../features/workbench/builtin-tools";
 import { useWorkbenchWidth } from "../features/workbench/use-workbench-width";
@@ -81,7 +83,7 @@ import {
 import { TreeModal } from "../features/conversation/tree-modal";
 import { ForkModal } from "../features/conversation/fork-modal";
 import { getEffectiveModelRuntime } from "../features/settings/model-settings";
-import { applyThemePresetToRoot } from "../features/settings/theme-presets";
+import { applyTheme, getActiveTheme, useActiveTheme } from "../ui/active-theme";
 import { deriveWorkspaceContext } from "./workspace-context";
 import { useTreeForkModals } from "../features/conversation/hooks/use-tree-fork-modals";
 import { useComposerDraftSync } from "../features/conversation/hooks/use-composer-draft-sync";
@@ -97,13 +99,8 @@ export default function App() {
   const [settingsWorkspaceId, setSettingsWorkspaceId] = useState("");
   const [skillsWorkspaceId, setSkillsWorkspaceId] = useState("");
   const [extensionsWorkspaceId, setExtensionsWorkspaceId] = useState("");
-  const [resolvedTheme, setResolvedTheme] = useState<"light" | "dark">("light");
-  const [extensionViewTheme, setExtensionViewTheme] = useState<ExtensionViewTheme>({
-    mode: "light",
-    background: "#ffffff",
-    foreground: "#171717",
-    accent: "#6554a4",
-  });
+  // Unknown until main answers; until then the theme from the last launch stays.
+  const [resolvedTheme, setResolvedTheme] = useState<"light" | "dark" | null>(null);
   const [dockExpandedBySession, setDockExpandedBySession] = useState<Record<string, string>>({});
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const timelinePaneRef = useRef<HTMLDivElement | null>(null);
@@ -125,32 +122,43 @@ export default function App() {
       .getResolvedTheme()
       .then((theme) => {
         setResolvedTheme(theme);
-        document.documentElement.classList.toggle("dark", theme === "dark");
       })
       .catch((error: unknown) => {
         console.error("[renderer] getResolvedTheme failed", error);
+        // Keep the variant painted at startup so preset changes still apply.
+        setResolvedTheme((current) => current ?? getActiveTheme().variant);
       });
 
     const unsub = piApi.onThemeChanged((theme) => {
       setResolvedTheme(theme);
-      document.documentElement.classList.toggle("dark", theme === "dark");
     });
 
     return unsub;
   }, []);
 
   useEffect(() => {
-    const root = document.documentElement;
-    applyThemePresetToRoot(root, snapshot?.themePresetId ?? "default", resolvedTheme);
-    root.classList.toggle("enable-transparency", snapshot?.enableTransparency ?? false);
-    const style = getComputedStyle(root);
-    setExtensionViewTheme({
-      mode: resolvedTheme,
-      background: style.getPropertyValue("--main").trim(),
-      foreground: style.getPropertyValue("--text").trim(),
-      accent: style.getPropertyValue("--accent").trim(),
-    });
-  }, [resolvedTheme, snapshot?.themePresetId, snapshot?.enableTransparency]);
+    const themePresetId = snapshot?.themePresetId;
+    if (!resolvedTheme || !themePresetId) return;
+    applyTheme(themePresetId, resolvedTheme);
+  }, [resolvedTheme, snapshot?.themePresetId]);
+
+  useEffect(() => {
+    document.documentElement.classList.toggle(
+      "enable-transparency",
+      snapshot?.enableTransparency ?? false,
+    );
+  }, [snapshot?.enableTransparency]);
+
+  const activeTheme = useActiveTheme();
+  const extensionViewTheme = useMemo<ExtensionViewTheme>(
+    () => ({
+      mode: activeTheme.variant,
+      background: activeTheme.tokens["--main"] ?? "",
+      foreground: activeTheme.tokens["--text"] ?? "",
+      accent: activeTheme.tokens["--accent"] ?? "",
+    }),
+    [activeTheme],
+  );
 
   const {
     activeWorktrees,
@@ -213,6 +221,8 @@ export default function App() {
   } = useComposerDraftSync({ api, snapshot, selectedSession: workbenchTarget });
   const extensionViews = useExtensionViews({ api, target: workbenchTarget });
   const workbench = useWorkbench({ api, target: workbenchTarget });
+  // Tracked while the panel is closed too, so a chord that opens it shows the hints.
+  const sidePanelTabHintsVisible = useSidePanelTabHintsVisible(api?.platform ?? "linux");
   const workbenchTargetRef = useRef(workbenchTarget);
   workbenchTargetRef.current = workbenchTarget;
   const extensionHostActions = useExtensionHostActions({
@@ -261,9 +271,20 @@ export default function App() {
   const transcriptFailed = transcriptHydration?.kind === "failed" ? transcriptHydration : null;
   const isTranscriptLoading =
     Boolean(selectedSession) && !selectedTranscriptForSession && !transcriptFailed;
+  const selectedSessionRunning = selectedSession?.status === "running";
+  const turnChanges = useTurnChanges({
+    api,
+    target: workbenchTarget,
+    running: selectedSessionRunning,
+    workbench,
+  });
   const timelineRows = useMemo(
-    () => buildDisplayTimelineItems(activeTranscript),
-    [activeTranscript],
+    () =>
+      buildDisplayTimelineItems(activeTranscript, {
+        lastTurnRunning: selectedSessionRunning,
+        turnChanges: turnChanges.turns,
+      }),
+    [activeTranscript, selectedSessionRunning, turnChanges.turns],
   );
   const viewport = useTimelineViewport({
     sessionKey: selectedSessionKey,
@@ -377,31 +398,6 @@ export default function App() {
       request: { workspaceId: workspace.id, path, nonce: Date.now() },
     });
   }, []);
-  const reviewTurnRequestRef = useRef(0);
-  const handleReviewTurn = useCallback(
-    async (messageId: string) => {
-      const target = workbenchTargetRef.current;
-      if (!api || !target) return;
-      const request = ++reviewTurnRequestRef.current;
-      const stillSelected = () =>
-        workbenchTargetRef.current === target && reviewTurnRequestRef.current === request;
-      try {
-        const result = await api.resolveTurnReview({ target, messageId });
-        if (!stillSelected()) return;
-        if (result.state !== "available") throw new Error(result.message);
-        workbenchRef.current.setChanges({
-          workspaceId: target.workspaceId,
-          selectedPath: null,
-          scope: { kind: "turn", checkpointId: result.checkpointId },
-        });
-        workbenchRef.current.openTool({ kind: "changes" });
-        setDiffFileRequest(null);
-      } catch (error) {
-        if (stillSelected()) throw error;
-      }
-    },
-    [api],
-  );
   const selectedSessionKeyRef = useRef(selectedSessionKey);
   selectedSessionKeyRef.current = selectedSessionKey;
   const selectedWorkspaceRef = useRef(selectedWorkspace);
@@ -961,8 +957,10 @@ export default function App() {
           api={api}
           setSnapshot={setSnapshot}
           updateSnapshot={updateSnapshot}
-          onNewThread={() =>
-            newThread.openSurface(selectedWorkspace?.rootWorkspaceId ?? selectedWorkspace?.id)
+          onNewThread={(workspaceId) =>
+            newThread.openSurface(
+              workspaceId ?? selectedWorkspace?.rootWorkspaceId ?? selectedWorkspace?.id,
+            )
           }
           onSetActiveView={setActiveView}
           onOpenSkills={openSkills}
@@ -978,7 +976,11 @@ export default function App() {
       <main className={mainClassName} style={workbenchWidth.style}>
         <Topbar
           activeView={snapshot.activeView}
-          rootWorkspace={rootWorkspace}
+          rootWorkspace={
+            snapshot.activeView === "new-thread"
+              ? (newThread.workspace ?? rootWorkspace)
+              : rootWorkspace
+          }
           selectedWorkspace={selectedWorkspace}
           selectedWorktree={selectedWorktree}
           api={api}
@@ -1148,7 +1150,7 @@ export default function App() {
                     viewport={viewport}
                     threadSearch={threadSearch}
                     onViewFileInDiff={handleViewFileInDiff}
-                    onReviewTurn={handleReviewTurn}
+                    onOpenTurnChange={turnChanges.openTurnChange}
                     onOpenWorkspaceFileLine={handleOpenWorkspaceFileLine}
                     workspacePath={selectedWorkspace.path}
                     onForkFromMessage={
@@ -1175,6 +1177,11 @@ export default function App() {
                 composerDraft={composerDraft}
                 composerRef={composerRef}
                 runtime={selectedModelRuntime}
+                usage={
+                  selectedSessionKey
+                    ? snapshot?.sessionUsageBySession[selectedSessionKey]
+                    : undefined
+                }
                 provider={resolvedSessionProvider}
                 modelId={resolvedSessionModelId}
                 thinkingLevel={resolvedSessionThinkingLevel}
@@ -1203,6 +1210,7 @@ export default function App() {
                 onSubmit={submitComposerDraft}
                 onStop={stopCurrentRun}
                 runningLabel={runningLabel}
+                steerShortcutLabel={api.platform === "darwin" ? "Cmd+Enter" : "Ctrl+Enter"}
                 selectedSession={selectedSession}
                 lastError={snapshot.lastError}
                 selectedSlashCommand={
@@ -1288,6 +1296,8 @@ export default function App() {
         {sidePanelVisible && selectedWorkspace && selectedSession ? (
           <Workbench
             view={workbench.view}
+            platform={api?.platform ?? "linux"}
+            tabHintsVisible={sidePanelTabHintsVisible}
             onResize={workbenchWidth.setWidth}
             onTogglePanel={commands.toggleSidePanel}
             extensionViews={extensionViews.views}

@@ -12,8 +12,15 @@ import {
   makeWorkspace,
 } from "../helpers/electron-app";
 
-for (const finish of ["stop", "complete"] as const) {
-  test(`Thread switching and pin controls stay responsive during a pending prompt (${finish})`, async () => {
+const pendingPrompts = [
+  { finish: "stop", prompt: "Keep this prompt pending until Stop" },
+  { finish: "complete", prompt: "Keep this prompt pending until Stop" },
+  // Text starting with "/" that is not a local or extension command is an ordinary prompt too.
+  { finish: "complete", prompt: "/tmp/notes.md summarise this file" },
+] as const;
+
+for (const { finish, prompt } of pendingPrompts) {
+  test(`Thread switching and pin controls stay responsive during a pending prompt (${finish}: ${prompt})`, async () => {
     const userDataDir = await makeUserDataDir();
     const workspacePath = await makeWorkspace("stop-pending-prompt");
     const harness = await launchDesktop(userDataDir, {
@@ -109,9 +116,13 @@ for (const finish of ["stop", "complete"] as const) {
           submitChannel: desktopIpc.submitComposer,
         },
       );
-      await page.getByTestId("composer").fill("Keep this prompt pending until Stop");
+      await page.getByTestId("composer").fill(prompt);
       await page.getByTestId("send").click();
       await expect(page.getByRole("button", { name: "Stop run", exact: true })).toBeVisible();
+      const steerKey = process.platform === "darwin" ? "Cmd+Enter" : "Ctrl+Enter";
+      await expect(page.locator(".composer__hint")).toContainText(
+        `Enter to queue · ${steerKey} to steer`,
+      );
       await pinnedSection.getByRole("button", { name: /^Unpin Pending prompt/ }).click();
       await expect(pinnedSection).toHaveCount(0);
       const row = page.locator(`.session-row[data-session-id="${target.sessionId}"]`);

@@ -3,7 +3,7 @@ import { sessionKey } from "@pi-gui/session-driver";
 import type { SessionSchemaInfo } from "@pi-gui/session-driver";
 import type { BrowserWindow } from "electron";
 import { readFile, stat } from "node:fs/promises";
-import { homedir } from "node:os";
+import { homedir, hostname } from "node:os";
 import { join, resolve } from "node:path";
 import {
   applyHostUiRequestToExtensionUiState,
@@ -23,6 +23,7 @@ import type {
   CreateSessionOptions,
   HostUiResponse,
   SessionConfig,
+  SessionUsageSnapshot,
   SessionDriverEvent,
   SessionQueuedMessage,
   SessionRef,
@@ -120,6 +121,7 @@ import {
   createEmptyExtensionUiState,
   serializeExtensionUiState,
 } from "../conversation/session-state-map";
+import { appWorktreeRootMatcher } from "../platform/worktrees/app-worktree-roots";
 import { GitWorktreeManager } from "../platform/worktrees/worktree-manager";
 import { createWorkspaceOwner, type WorkspaceOwner } from "../workspace/app-store-workspace";
 import {
@@ -133,6 +135,7 @@ import {
 } from "../orchestration/app-store-orchestration";
 import {
   createScheduledTaskOwner,
+  isScheduledTaskInFlight,
   type ScheduledTaskOwner,
 } from "../scheduled-tasks/app-store-scheduled-tasks";
 import { earliestScheduledWakeAt } from "../scheduled-tasks/scheduled-task-schedule";
@@ -165,11 +168,7 @@ export interface DesktopAppStoreOptions {
   readonly shouldKeepSessionDialogs?: (sessionRef: SessionRef) => boolean;
   readonly driverOptions?: Pick<
     PiSdkDriverConfig,
-    | "extensionFactories"
-    | "inlineExtensionMetadata"
-    | "desktopExtensions"
-    | "onTurnCaptureBoundary"
-    | "turnCaptureTimeoutMs"
+    "builtinExtensions" | "desktopExtensions" | "onTurnCaptureBoundary" | "turnCaptureTimeoutMs"
   >;
   readonly generateThreadTitleOverride?: (
     workspace: WorkspaceRef,
@@ -227,6 +226,7 @@ export class DesktopAppStore {
   private readonly catalogStore: JsonCatalogStore;
   private readonly worktreeManager: GitWorktreeManager;
   private readonly worktreeRoot: string;
+  private readonly isAppWorktreePath: (path: string) => Promise<boolean>;
   private readonly uiStateFilePath: string;
   private readonly interfaceZoomFilePath: string;
   private readonly scheduledTasksFilePath: string;
@@ -264,6 +264,8 @@ export class DesktopAppStore {
   private readonly workspaceOwner: WorkspaceOwner;
   private readonly orchestrationOwner: OrchestrationOwner;
   private readonly scheduledTaskOwner: ScheduledTaskOwner;
+  /** App-wide: built-in pi-gui extensions the user switched off in Settings. */
+  private readonly disabledBuiltinExtensions = new Set<string>();
 
   constructor(options: DesktopAppStoreOptions) {
     const catalogFilePath = join(options.userDataDir, "catalogs.json");
@@ -271,14 +273,19 @@ export class DesktopAppStore {
     const driverOptions: PiSdkDriverConfig = {
       catalogStorage: this.catalogStore,
       ...(options.driverOptions ?? {}),
+      isBuiltinExtensionEnabled: (name) => !this.disabledBuiltinExtensions.has(name),
       ...(options.generateThreadTitleOverride
         ? { generateThreadTitleOverride: options.generateThreadTitleOverride }
         : {}),
     };
 
     this.driver = new PiSdkDriver(driverOptions);
-    this.worktreeManager = new GitWorktreeManager({ catalogStorage: this.catalogStore });
     this.worktreeRoot = join(options.userDataDir, "worktrees");
+    this.isAppWorktreePath = appWorktreeRootMatcher(this.worktreeRoot);
+    this.worktreeManager = new GitWorktreeManager({
+      catalogStorage: this.catalogStore,
+      isAppWorktreePath: this.isAppWorktreePath,
+    });
     this.uiStateFilePath = join(options.userDataDir, "ui-state.json");
     this.interfaceZoomFilePath = join(options.userDataDir, "interface-zoom.json");
     this.scheduledTasksFilePath = join(options.userDataDir, "scheduled-tasks.json");
@@ -395,6 +402,7 @@ export class DesktopAppStore {
       catalogStore: this.catalogStore,
       worktreeManager: this.worktreeManager,
       worktreeRoot: this.worktreeRoot,
+      isAppWorktreePath: this.isAppWorktreePath,
       setRuntimeSnapshot: (workspaceId, snapshot) => {
         this.runtimeByWorkspace.set(workspaceId, snapshot);
       },
@@ -417,6 +425,7 @@ export class DesktopAppStore {
         this.sessionState.transcriptCache.set(key, []);
         this.sessionState.loadedTranscriptKeys.add(key);
         this.updateSessionConfig(snapshot.ref, snapshot.config);
+        this.updateSessionUsage(snapshot.ref, snapshot.usage);
       },
       unpinSession: (sessionRef) => {
         const key = sessionKey(sessionRef);
@@ -475,6 +484,7 @@ export class DesktopAppStore {
         this.sessionState.transcriptCache.set(key, []);
         this.sessionState.loadedTranscriptKeys.add(key);
         this.updateSessionConfig(snapshot.ref, snapshot.config);
+        this.updateSessionUsage(snapshot.ref, snapshot.usage);
       },
       transcriptFor: (sessionRef) =>
         this.sessionState.transcriptCache.get(sessionKey(sessionRef)) ?? [],
@@ -506,6 +516,7 @@ export class DesktopAppStore {
         this.state = { ...this.state, scheduledTasks: [...tasks] };
       },
       persistScheduledTasks: () => this.persistScheduledTasks(),
+      rescheduleScheduledTasks: () => this.scheduleScheduledTasks(),
       canWriteScheduledTasks: () => this.scheduledTasksWritable,
       emit: () => this.emit(),
       refreshState: (refreshOptions) => this.refreshState(refreshOptions),
@@ -753,7 +764,10 @@ export class DesktopAppStore {
       this.scheduledTaskWakeAt = undefined;
       return;
     }
-    const nextRunAt = earliestScheduledWakeAt(this.state.scheduledTasks);
+    // A task whose run is still in flight re-arms the timer when that run settles.
+    const nextRunAt = earliestScheduledWakeAt(
+      this.state.scheduledTasks.filter((task) => !isScheduledTaskInFlight(task.id)),
+    );
     if (nextRunAt && nextRunAt === this.scheduledTaskWakeAt && this.scheduledTaskTimer) {
       return;
     }
@@ -1068,6 +1082,10 @@ export class DesktopAppStore {
     options?: { readonly deliverAs?: "steer" | "followUp" },
   ): Promise<DesktopAppState> {
     return this.conversationOwner.submitComposer(sessionRef, textInput, options);
+  }
+
+  composerSubmitNeedsSenderView(sessionRef: SessionRef | undefined, textInput: string): boolean {
+    return this.conversationOwner.composerSubmitNeedsSenderView(sessionRef, textInput);
   }
 
   async editQueuedComposerMessage(
@@ -1676,11 +1694,64 @@ export class DesktopAppStore {
     filePath: string,
     enabled: boolean,
   ): Promise<DesktopAppState> {
+    const builtinName = this.driver.runtimeSupervisor.builtinExtensionName(filePath);
+    if (builtinName) {
+      return this.setBuiltinExtensionEnabled(workspaceId, builtinName, enabled);
+    }
     return this.withRuntimeUpdate(
       workspaceId,
       (ws) => this.driver.runtimeSupervisor.setExtensionEnabled(ws, filePath, enabled),
       { reloadSessions: true },
     );
+  }
+
+  /** pi-gui owns built-in extensions, so their switch is app-wide rather than in pi's settings. */
+  private async setBuiltinExtensionEnabled(
+    workspaceId: string,
+    name: string,
+    enabled: boolean,
+  ): Promise<DesktopAppState> {
+    await this.initialize();
+    const ws = this.workspaceRefFromState(workspaceId);
+    if (!ws) {
+      return this.withError(`Unknown workspace: ${workspaceId}`);
+    }
+    const wasDisabled = this.disabledBuiltinExtensions.has(name);
+    const setDisabled = (disabled: boolean) =>
+      disabled
+        ? this.disabledBuiltinExtensions.add(name)
+        : this.disabledBuiltinExtensions.delete(name);
+    setDisabled(!enabled);
+    try {
+      await this.persistUiState();
+    } catch (error) {
+      // New sessions read the set directly, so an unsaved change must not stay in effect.
+      setDisabled(wasDisabled);
+      return this.withError(error);
+    }
+
+    return this.withErrorHandling(async () => {
+      const snapshot = await this.driver.runtimeSupervisor.refreshRuntime(ws);
+      await this.refreshRuntimeForAllWorkspaces(workspaceId, snapshot);
+      // One workspace failing to reload must not keep the others, or Settings, on the old tools.
+      const reloads = await Promise.allSettled(
+        this.state.workspaces.map((workspace) => {
+          this.clearExtensionUiForWorkspace(workspace.id);
+          return this.reloadSessionsForWorkspace(workspace.id);
+        }),
+      );
+      await this.refreshSessionCommandsForAllWorkspaces();
+      const failed = reloads.filter((result) => result.status === "rejected");
+      for (const result of failed) {
+        console.error("[app-store] reload after pi-gui tool switch failed", result.reason);
+      }
+      const state = await this.refreshState({ clearLastError: true });
+      return failed.length === 0
+        ? state
+        : this.withError(
+            "Some open threads could not reload; they pick up the pi-gui tools change when reopened.",
+          );
+    });
   }
 
   private async withRuntimeUpdate(
@@ -1950,6 +2021,10 @@ export class DesktopAppStore {
   }
 
   private restorePersistedUiState(persisted: LegacyPersistedUiState): void {
+    this.disabledBuiltinExtensions.clear();
+    for (const name of persisted.disabledBuiltinExtensions ?? []) {
+      this.disabledBuiltinExtensions.add(name);
+    }
     this.taskWorkbenchTemplatesBySession.clear();
     for (const [key, template] of Object.entries(persisted.taskWorkbenchTemplatesBySession ?? {})) {
       this.taskWorkbenchTemplatesBySession.set(key, template);
@@ -2256,6 +2331,7 @@ export class DesktopAppStore {
         activeView,
         runtimeByWorkspace,
         sessionCommandsBySession: mapToRecord(this.sessionState.sessionCommandsBySession),
+        sessionUsageBySession: mapToRecord(this.sessionState.sessionUsageBySession),
         sessionExtensionUiBySession: this.serializeSessionExtensionUiState(),
         extensionCommandCompatibilityByWorkspace: serializeCompatibilityByWorkspace(
           this.extensionCommandCompatibilityByWorkspace,
@@ -3127,11 +3203,13 @@ export class DesktopAppStore {
         case "sessionOpened":
         case "runCompleted":
           this.updateSessionConfig(event.sessionRef, event.snapshot.config);
+          this.updateSessionUsage(event.sessionRef, event.snapshot.usage);
           this.updateQueuedComposerMessages(event.sessionRef, event.snapshot.queuedMessages);
           await this.refreshSessionCommands(event.sessionRef);
           break;
         case "sessionUpdated":
           this.updateSessionConfig(event.sessionRef, event.snapshot.config);
+          this.updateSessionUsage(event.sessionRef, event.snapshot.usage);
           this.updateQueuedComposerMessages(event.sessionRef, event.snapshot.queuedMessages);
           if (event.snapshot.status !== "running") {
             this.refreshSessionCommandsCoalesced(event.sessionRef);
@@ -3151,6 +3229,7 @@ export class DesktopAppStore {
           this.clearExtensionDialogTimeoutsForSession(event.sessionRef);
           this.sessionState.extensionUiBySession.delete(key);
           this.sessionState.sessionCommandsBySession.delete(key);
+          this.sessionState.sessionUsageBySession.delete(key);
           this.sessionState.queuedComposerMessagesBySession.delete(key);
           this.sessionState.queuedComposerEditsBySession.delete(key);
           this.clearPendingAutoTitle(event.sessionRef);
@@ -3414,6 +3493,11 @@ export class DesktopAppStore {
         key,
         this.sessionState.sessionCommandsBySession.get(key),
       ),
+      sessionUsageBySession: updateRecordValue(
+        state.sessionUsageBySession,
+        key,
+        this.sessionState.sessionUsageBySession.get(key),
+      ),
       sessionExtensionUiBySession: updateRecordValue(
         state.sessionExtensionUiBySession,
         key,
@@ -3633,6 +3717,10 @@ export class DesktopAppStore {
         this.extensionCommandCompatibilityByWorkspace,
       ),
       notificationPreferences: this.state.notificationPreferences,
+      disabledBuiltinExtensions:
+        this.disabledBuiltinExtensions.size > 0
+          ? [...this.disabledBuiltinExtensions].sort()
+          : undefined,
       integratedTerminalShell: this.state.integratedTerminalShell || undefined,
       lastViewedAtBySession: mapToRecord(this.sessionState.lastViewedAtBySession),
       lastInteractedAtBySession: mapToRecord(this.sessionState.lastInteractedAtBySession),
@@ -4237,6 +4325,18 @@ export class DesktopAppStore {
     }
   }
 
+  private updateSessionUsage(
+    sessionRef: SessionRef,
+    usage: SessionUsageSnapshot | undefined,
+  ): void {
+    const key = sessionKey(sessionRef);
+    if (usage) {
+      this.sessionState.sessionUsageBySession.set(key, usage);
+    } else {
+      this.sessionState.sessionUsageBySession.delete(key);
+    }
+  }
+
   updateQueuedComposerMessages(
     sessionRef: SessionRef,
     queuedMessages: readonly SessionQueuedMessage[] | undefined,
@@ -4414,7 +4514,11 @@ function describeStoreError(error: unknown): string {
   if (isSessionLeasedError(error)) {
     const { holder } = error;
     const where = holder.surface === "pi-cli" ? "the pi CLI" : "another pi instance";
-    return `This session is currently open in ${where} (pid ${holder.pid} on host ${holder.hostname}). Close it there or wait a few minutes before continuing here.`;
+    // A holder on this machine keeps its lease while it runs; one elsewhere
+    // may have crashed, and its lease then expires after a few minutes.
+    const next =
+      holder.hostname === hostname() ? "Close it there" : "Close it there or wait a few minutes";
+    return `This session is currently open in ${where} (pid ${holder.pid} on host ${holder.hostname}). ${next} to continue here.`;
   }
   return error instanceof Error ? error.message : String(error);
 }

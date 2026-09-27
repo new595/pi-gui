@@ -17,8 +17,8 @@ import type { DesktopProxyStatus } from "./proxy-status";
 import type { SessionRef } from "@pi-gui/session-driver/types";
 import type { SaveTaskWorkbenchTemplateInput, TaskWorkbenchTemplate } from "./workbench";
 import type {
-  ResolveTurnReviewInput,
-  ResolveTurnReviewResult,
+  TurnChangesInput,
+  TurnChangesResult,
   GetReviewInput,
   ReviewResult,
   ReviewFileInput,
@@ -184,7 +184,7 @@ export const desktopIpc = {
   getChangedFiles: "pi-gui:get-changed-files",
   getFileDiff: "pi-gui:get-file-diff",
   stageFile: "pi-gui:stage-file",
-  resolveTurnReview: "pi-gui:resolve-turn-review",
+  getTurnChanges: "pi-gui:get-turn-changes",
   getReview: "pi-gui:get-review",
   getReviewFile: "pi-gui:get-review-file",
   setReviewFileReviewed: "pi-gui:set-review-file-reviewed",
@@ -194,6 +194,7 @@ export const desktopIpc = {
   setThemeMode: "pi-gui:set-theme-mode",
   setThemePresetId: "pi-gui:set-theme-preset-id",
   themeChanged: "pi-gui:theme-changed",
+  windowFocused: "pi-gui:window-focused",
   ping: "app:ping",
   openExternal: "app:open-external",
   relaunchApplication: "pi-gui:relaunch-application",
@@ -204,7 +205,7 @@ export const desktopCommands = {
   openNewThread: "open-new-thread",
   toggleTerminal: "toggle-terminal",
   toggleSidePanel: "toggle-side-panel",
-  toggleChanges: "toggle-changes",
+  toggleReview: "toggle-review",
   closeFocusedSurface: "close-focused-surface",
   toggleSidebar: "toggle-sidebar",
   openCommandPalette: "open-command-palette",
@@ -220,6 +221,15 @@ export const desktopCommands = {
   selectRecentThread7: "select-recent-thread-7",
   selectRecentThread8: "select-recent-thread-8",
   selectRecentThread9: "select-recent-thread-9",
+  selectSidePanelTab1: "select-side-panel-tab-1",
+  selectSidePanelTab2: "select-side-panel-tab-2",
+  selectSidePanelTab3: "select-side-panel-tab-3",
+  selectSidePanelTab4: "select-side-panel-tab-4",
+  selectSidePanelTab5: "select-side-panel-tab-5",
+  selectSidePanelTab6: "select-side-panel-tab-6",
+  selectSidePanelTab7: "select-side-panel-tab-7",
+  selectSidePanelTab8: "select-side-panel-tab-8",
+  selectSidePanelTab9: "select-side-panel-tab-9",
 } as const;
 
 const RECENT_THREAD_COMMANDS = [
@@ -238,6 +248,71 @@ export const THREAD_SHORTCUT_SLOT_COUNT = RECENT_THREAD_COMMANDS.length;
 
 export function isRecentThreadCommand(command: PiDesktopCommand | undefined): boolean {
   return (RECENT_THREAD_COMMANDS as readonly (PiDesktopCommand | undefined)[]).includes(command);
+}
+
+const SIDE_PANEL_TAB_COMMANDS = [
+  desktopCommands.selectSidePanelTab1,
+  desktopCommands.selectSidePanelTab2,
+  desktopCommands.selectSidePanelTab3,
+  desktopCommands.selectSidePanelTab4,
+  desktopCommands.selectSidePanelTab5,
+  desktopCommands.selectSidePanelTab6,
+  desktopCommands.selectSidePanelTab7,
+  desktopCommands.selectSidePanelTab8,
+  desktopCommands.selectSidePanelTab9,
+] as const;
+
+export const SIDE_PANEL_TAB_SHORTCUT_SLOT_COUNT = SIDE_PANEL_TAB_COMMANDS.length;
+
+/** The zero-based side panel tab a command selects, or undefined for other commands. */
+export function sidePanelTabIndex(command: PiDesktopCommand | undefined): number | undefined {
+  const index = (SIDE_PANEL_TAB_COMMANDS as readonly (PiDesktopCommand | undefined)[]).indexOf(
+    command,
+  );
+  return index < 0 ? undefined : index;
+}
+
+/**
+ * The side panel tab modifier: Control on macOS, where Command switches threads,
+ * and Alt elsewhere, where Control does. It must be the only modifier held.
+ */
+export function sidePanelTabModifierHeld(
+  platform: NodeJS.Platform,
+  input: {
+    readonly meta: boolean;
+    readonly control: boolean;
+    readonly alt: boolean;
+    readonly shift: boolean;
+  },
+): boolean {
+  if (input.shift || input.meta) return false;
+  return platform === "darwin" ? input.control && !input.alt : input.alt && !input.control;
+}
+
+/**
+ * Control+1-9 on macOS and Alt+1-9 elsewhere select side panel tab N. Keypad
+ * digits are left alone so Windows Alt codes keep typing characters.
+ */
+export function getSidePanelTabCommand(
+  platform: NodeJS.Platform,
+  input: {
+    readonly meta: boolean;
+    readonly control: boolean;
+    readonly alt: boolean;
+    readonly shift: boolean;
+    readonly key: string;
+    readonly code?: string;
+  },
+): PiDesktopCommand | undefined {
+  if (!sidePanelTabModifierHeld(platform, input) || input.code?.startsWith("Numpad")) {
+    return undefined;
+  }
+  const digit = input.code?.match(/^Digit([1-9])$/)?.[1] ?? input.key.match(/^[1-9]$/)?.[0];
+  return digit ? SIDE_PANEL_TAB_COMMANDS[Number(digit) - 1] : undefined;
+}
+
+export function getSidePanelTabShortcutLabel(platform: NodeJS.Platform, slot: number): string {
+  return `${platform === "darwin" ? "⌃" : "Alt+"}${slot}`;
 }
 
 export function getDesktopShortcutLabel(platform: NodeJS.Platform, key: string): string {
@@ -393,7 +468,7 @@ export function createDesktopCommandSubscription() {
 
 /** Collapses a repeated keydown from one physical chord so a toggle stays open. */
 export const SEARCH_CHORD_TOGGLE_MS = 200;
-export const CHANGES_TOGGLE_DEDUPE_MS = 8;
+export const REVIEW_TOGGLE_DEDUPE_MS = 8;
 
 export type ChordSource = "main" | "renderer";
 
@@ -401,7 +476,7 @@ export type ChordSource = "main" | "renderer";
  * Collapses one chord that reaches the renderer twice, once forwarded by the main
  * process and once as a keydown. Repeats from the same source are separate presses.
  */
-export function createChordPairGate(windowMs = CHANGES_TOGGLE_DEDUPE_MS) {
+export function createChordPairGate(windowMs = REVIEW_TOGGLE_DEDUPE_MS) {
   let last: { readonly source: ChordSource; readonly at: number } | undefined;
   return (source: ChordSource, now: number): boolean => {
     if (last && last.source !== source && now - last.at < windowMs) {
@@ -431,13 +506,13 @@ function isBufferedModifierChord(key: string, code?: string): boolean {
   const lower = key.toLowerCase();
   if (lower === "f" || code === "KeyF") return true;
   if (lower === "," || code === "Comma") return true;
-  if (lower === "d" || code === "KeyD") return true;
+  if (lower === "r" || code === "KeyR") return true;
   return /^[1-9]$/.test(key) || /^Digit[1-9]$/.test(code ?? "");
 }
 
 /**
  * Keeps Command/Ctrl chords that arrive before the React shortcut listener
- * exists. Search, settings, Changes, and thread digits are replayed.
+ * exists. Search, settings, Review, and thread digits are replayed.
  */
 export function createEarlyModifierChordBuffer() {
   const pending: EarlyModifierChord[] = [];
@@ -471,12 +546,12 @@ export function getDesktopCommandFromShortcut(
   const isComma = input.key === "," || input.code === "Comma";
   const isB = lowerKey === "b" || input.code === "KeyB";
   const isJ = lowerKey === "j" || input.code === "KeyJ";
-  const isD = lowerKey === "d" || input.code === "KeyD";
+  const isR = lowerKey === "r" || input.code === "KeyR";
   const isK = lowerKey === "k" || input.code === "KeyK";
   const isP = lowerKey === "p" || input.code === "KeyP";
   const isN = lowerKey === "n" || input.code === "KeyN";
   const isShiftO = input.shift && (lowerKey === "o" || input.code === "KeyO");
-  const isShiftR = input.shift && (lowerKey === "r" || input.code === "KeyR");
+  const isShiftR = input.shift && isR;
   const isShiftA = input.shift && (lowerKey === "a" || input.code === "KeyA");
 
   if (input.alt) {
@@ -494,8 +569,8 @@ export function getDesktopCommandFromShortcut(
     return desktopCommands.toggleTerminal;
   }
 
-  if (!input.shift && isD) {
-    return desktopCommands.toggleChanges;
+  if (!input.shift && isR) {
+    return desktopCommands.toggleReview;
   }
 
   if (!input.shift && isB) {
@@ -547,11 +622,13 @@ export function isPaletteCommand(command: PiDesktopCommand | undefined): boolean
 /**
  * Commands that act once per press and only from the platform modifier. macOS
  * Control chords stay with text fields, and off macOS the terminal keeps Control
- * chords. Holding Archive would otherwise archive each next thread in turn.
+ * chords. Holding Archive would otherwise archive each next thread in turn, and
+ * holding Review would flicker the panel.
  */
 export function isSinglePressCommand(command: PiDesktopCommand | undefined): boolean {
   return (
     isPaletteCommand(command) ||
+    command === desktopCommands.toggleReview ||
     command === desktopCommands.renameThread ||
     command === desktopCommands.archiveThread
   );
@@ -758,7 +835,7 @@ export interface PiDesktopApi {
   closeExtensionView(connectionId: string): Promise<void>;
   onExtensionViewMessage(listener: (event: ExtensionViewMessage) => void): () => void;
   onExtensionViewCatalogChanged(listener: (event: ExtensionViewCatalogChange) => void): () => void;
-  resolveTurnReview(input: ResolveTurnReviewInput): Promise<ResolveTurnReviewResult>;
+  getTurnChanges(input: TurnChangesInput): Promise<TurnChangesResult>;
   getReview(input: GetReviewInput): Promise<ReviewResult>;
   getReviewFile(input: ReviewFileInput): Promise<ReviewFileResult>;
   setReviewFileReviewed(input: SetReviewFileReviewedInput): Promise<SetReviewFileReviewedResult>;
@@ -769,5 +846,7 @@ export interface PiDesktopApi {
   getResolvedTheme(): Promise<"light" | "dark">;
   setThemeMode(mode: "system" | "light" | "dark"): Promise<DesktopAppState>;
   onThemeChanged(callback: (theme: "light" | "dark") => void): () => void;
+  /** The window came back to the foreground, so outside changes (edits, git) may need rereading. */
+  onWindowFocused(listener: () => void): () => void;
   relaunchApplication(): Promise<void>;
 }

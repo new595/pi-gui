@@ -1,9 +1,11 @@
 import { execFile } from "node:child_process";
-import { realpath, writeFile } from "node:fs/promises";
+import { writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { promisify } from "node:util";
 import { expect, test, type Locator, type Page } from "@playwright/test";
+import type { WorkspaceRecord } from "../../contracts/desktop-state";
 import {
+  assertExists,
   commitAllInGitRepo,
   createNamedThread,
   initGitRepo,
@@ -13,6 +15,10 @@ import {
   seedAgentDir,
   selectSidePanel,
   waitForWorkspaceByPath,
+  chooseReviewScope,
+  reviewScopeButton,
+  chooseReviewCheckout,
+  reviewComparisonIdentity,
 } from "../helpers/electron-app";
 
 const execFileAsync = promisify(execFile);
@@ -21,20 +27,24 @@ async function git(cwd: string, ...args: string[]): Promise<string> {
   return (await execFileAsync("git", args, { cwd })).stdout;
 }
 
-async function openReview(workspacePath: string, additionalWorkspaces: readonly string[] = []) {
+async function openReview(
+  workspacePath: string,
+  beforeThread?: (window: Page, workspace: WorkspaceRecord) => Promise<void>,
+) {
   const userDataDir = await makeUserDataDir();
   const agentDir = join(userDataDir, "agent");
   await seedAgentDir(agentDir, { withOpenAiAuth: false });
   const harness = await launchDesktop(userDataDir, {
     agentDir,
-    initialWorkspaces: [workspacePath, ...additionalWorkspaces],
+    initialWorkspaces: [workspacePath],
     testMode: "background",
   });
   const window = await harness.firstWindow();
   const workspace = await waitForWorkspaceByPath(window, workspacePath);
+  await beforeThread?.(window, workspace);
   await createNamedThread(window, "Review scope task", { workspaceName: workspace.name });
-  await selectSidePanel(window, "Changes");
-  const panel = window.getByRole("region", { name: "Changes review", exact: true });
+  await selectSidePanel(window, "Review");
+  const panel = window.getByRole("region", { name: "Review", exact: true });
   await expect(panel).toBeVisible();
   return { harness, window, panel, workspace };
 }
@@ -50,7 +60,7 @@ async function openFile(panel: Locator, path: string): Promise<void> {
 }
 
 async function chooseBranch(window: Page, baseRef: string): Promise<void> {
-  await window.getByLabel("Review scope", { exact: true }).selectOption("branch");
+  await chooseReviewScope(window, "Branch");
   await window.getByLabel("Base branch", { exact: true }).fill(baseRef);
   await window.getByRole("button", { name: "Compare", exact: true }).click();
 }
@@ -65,15 +75,18 @@ test("Uncommitted preserves staged and unstaged changes that cancel each other",
   await writeFile(join(workspacePath, "result.txt"), "baseline content\n");
   const { harness, window, panel } = await openReview(workspacePath);
   try {
-    await expect(window.getByLabel("Review scope", { exact: true })).toHaveValue("uncommitted");
+    await expect(reviewScopeButton(window)).toHaveText("Uncommitted");
     await expect(panel.locator(".diff-panel__file")).toHaveCount(1);
     await openFile(panel, "result.txt");
     await expect(panel).toContainText("staged and unstaged changes cancel each other");
-    const staged = panel.getByRole("region", { name: "Staged", exact: true });
-    const unstaged = panel.getByRole("region", { name: "Unstaged", exact: true });
-    await expect(staged.locator(".diff-line--added")).toContainText("staged content");
-    await expect(unstaged.locator(".diff-line--removed")).toContainText("staged content");
-    await expect(unstaged.locator(".diff-line--added")).toContainText("baseline content");
+    const diff = panel.getByRole("region", { name: "Diff", exact: true });
+    await expect(diff).toHaveCount(0);
+    await chooseReviewScope(window, "Staged");
+    await expect(diff.locator(".diff-line--added")).toContainText("staged content");
+    await chooseReviewScope(window, "Unstaged");
+    await expect(diff.locator(".diff-line--removed")).toContainText("staged content");
+    await expect(diff.locator(".diff-line--added")).toContainText("baseline content");
+    await chooseReviewScope(window, "Uncommitted");
     await expect(
       fileRow(panel, "result.txt").getByRole("button", { name: "Unstage", exact: true }),
     ).toBeEnabled();
@@ -111,9 +124,9 @@ test("Uncommitted keeps a reviewed mark through stage and unstage until the file
     await writeFile(join(workspacePath, "result.txt"), "edited after review\n");
     await panel.getByRole("button", { name: "Refresh", exact: true }).click();
     await openFile(panel, "result.txt");
-    await expect(
-      panel.getByRole("region", { name: "Combined changes", exact: true }),
-    ).toContainText("edited after review");
+    await expect(panel.getByRole("region", { name: "Diff", exact: true })).toContainText(
+      "edited after review",
+    );
     await expect(mark).not.toBeChecked();
   } finally {
     await harness.close();
@@ -134,23 +147,24 @@ test("Branch compares committed revisions and reports a missing base explicitly"
   const { harness, window, panel } = await openReview(workspacePath);
   try {
     await chooseBranch(window, "release-base");
-    await expect(panel.getByTestId("review-comparison-identity")).toContainText("release-base");
+    await expect(await reviewComparisonIdentity(window)).toContainText("release-base");
+    await window.keyboard.press("Escape");
     await expect(panel.locator(".diff-panel__file")).toHaveCount(1);
     await openFile(panel, "result.txt");
-    const patch = panel.getByRole("region", { name: "Combined changes", exact: true });
+    const patch = panel.getByRole("region", { name: "Diff", exact: true });
     await expect(patch).toContainText("committed feature revision");
     await expect(patch).not.toContainText("unsaved working revision");
     await expect(panel.getByRole("button", { name: /^(Stage|Staged|Unstage)$/ })).toHaveCount(0);
     await fileRow(panel, "result.txt").getByRole("checkbox").click();
     await expect(panel.getByTestId("diff-panel-counter")).toHaveText("Reviewed 1 of 1");
 
-    await window.getByLabel("Review scope", { exact: true }).selectOption("uncommitted");
+    await chooseReviewScope(window, "Uncommitted");
     await expect(panel.locator(".diff-panel__file")).toHaveCount(2);
     await expect(fileRow(panel, "result.txt").getByRole("checkbox")).not.toBeChecked();
     await openFile(panel, "result.txt");
-    await expect(
-      panel.getByRole("region", { name: "Combined changes", exact: true }),
-    ).toContainText("unsaved working revision");
+    await expect(panel.getByRole("region", { name: "Diff", exact: true })).toContainText(
+      "unsaved working revision",
+    );
 
     await chooseBranch(window, "missing-review-base");
     await expect(panel.getByTestId("changed-files-unavailable")).toContainText(
@@ -172,6 +186,10 @@ test("an outdated comparison cannot mark or stage newer working content", async 
   const { harness, panel } = await openReview(workspacePath);
   try {
     await expect(fileRow(panel, "result.txt")).toBeVisible();
+    // The first file's diff opens on its own; let that read finish before the file changes.
+    await expect(panel.getByRole("region", { name: "Diff", exact: true })).toContainText(
+      "first edit",
+    );
     await writeFile(join(workspacePath, "result.txt"), "changed after comparison\n");
     // The filesystem mutation models another editor after the visible list was loaded.
     await fileRow(panel, "result.txt").getByRole("checkbox").click();
@@ -186,9 +204,9 @@ test("an outdated comparison cannot mark or stage newer working content", async 
       .getByRole("button", { name: "Refresh comparison", exact: true })
       .click();
     await openFile(panel, "result.txt");
-    await expect(
-      panel.getByRole("region", { name: "Combined changes", exact: true }),
-    ).toContainText("changed after comparison");
+    await expect(panel.getByRole("region", { name: "Diff", exact: true })).toContainText(
+      "changed after comparison",
+    );
     await fileRow(panel, "result.txt").getByRole("checkbox").click();
     await expect(panel.getByTestId("diff-panel-counter")).toHaveText("Reviewed 1 of 1");
   } finally {
@@ -239,23 +257,38 @@ test("binary, oversized, and conflicted files show incomplete review coverage", 
 
 test("choosing another review checkout preserves the task and terminal checkout", async () => {
   const workspacePath = await makeWorkspace("review-checkout-root");
-  const worktreePath = join(await makeUserDataDir(), "linked-checkout");
   await initGitRepo(workspacePath);
   await commitAllInGitRepo(workspacePath, "Baseline");
-  await git(workspacePath, "worktree", "add", "-b", "review-linked", worktreePath);
   await writeFile(join(workspacePath, "root-only.txt"), "root changes\n");
-  await writeFile(join(worktreePath, "linked-only.txt"), "linked changes\n");
   await writeFile(join(workspacePath, "shared.txt"), "root version\n");
-  await writeFile(join(worktreePath, "shared.txt"), "linked version\n");
-  const { harness, window, panel, workspace } = await openReview(workspacePath, [worktreePath]);
+  let linked: WorkspaceRecord | undefined;
+  // Only worktrees pi-gui created are offered as other checkouts of this folder.
+  const { harness, window, panel, workspace } = await openReview(
+    workspacePath,
+    async (window, root) => {
+      const state = await window.evaluate(
+        (workspaceId) => globalThis.window.piApp.createWorktree({ workspaceId }),
+        root.id,
+      );
+      linked = state.workspaces.find((candidate) => candidate.id === state.selectedWorkspaceId);
+      assertExists(linked, "Expected the new worktree to be selected");
+      expect(linked.rootWorkspaceId).toBe(root.id);
+      await writeFile(join(linked.path, "linked-only.txt"), "linked changes\n");
+      await writeFile(join(linked.path, "shared.txt"), "linked version\n");
+      await window.evaluate(
+        (workspaceId) => globalThis.window.piApp.selectWorkspace(workspaceId),
+        root.id,
+      );
+    },
+  );
   try {
-    const linked = await waitForWorkspaceByPath(window, await realpath(worktreePath));
+    assertExists(linked, "Expected a pi-gui worktree");
     await window.getByTestId("composer").fill("Draft belongs to the original task");
     await expect(fileRow(panel, "root-only.txt")).toBeVisible();
     await expect(fileRow(panel, "linked-only.txt")).toHaveCount(0);
     await fileRow(panel, "shared.txt").getByRole("checkbox").click();
     await expect(fileRow(panel, "shared.txt").getByRole("checkbox")).toBeChecked();
-    await window.getByLabel("Review checkout", { exact: true }).selectOption(linked.id);
+    await chooseReviewCheckout(window, linked.id);
     await expect(fileRow(panel, "linked-only.txt")).toBeVisible();
     await expect(fileRow(panel, "root-only.txt")).toHaveCount(0);
     await expect(fileRow(panel, "shared.txt").getByRole("checkbox")).not.toBeChecked();
@@ -287,12 +320,12 @@ test("an existing task without captures shows Last turn as unavailable", async (
   await writeFile(join(workspacePath, "manual.txt"), "manual change is not a captured turn\n");
   const { harness, window, panel } = await openReview(workspacePath);
   try {
-    await window.getByLabel("Review scope", { exact: true }).selectOption("turn");
+    await chooseReviewScope(window, "Last Turn");
     await expect(panel.getByTestId("changed-files-unavailable")).toBeVisible();
     await expect(panel.getByTestId("changed-files-unavailable")).toContainText(/captur|turn/i);
     await expect(panel.locator(".diff-panel__file")).toHaveCount(0);
     await expect(panel.getByText("No changes", { exact: true })).toHaveCount(0);
-    await window.getByLabel("Review scope", { exact: true }).selectOption("uncommitted");
+    await chooseReviewScope(window, "Uncommitted");
     await expect(fileRow(panel, "manual.txt")).toBeVisible();
   } finally {
     await harness.close();
@@ -327,7 +360,7 @@ test("large changed-file lists scroll with bounded row layout and expandable cov
     await expect(notice.locator("ul")).toBeVisible();
     await notice.locator("summary").click();
     await expect(rows.first()).toHaveCSS("content-visibility", "auto");
-    await expect(rows.first()).toHaveCSS("height", "36px");
+    await expect(rows.first()).toHaveCSS("height", "30px");
     const list = panel.locator(".diff-panel__file-list");
     const box = (await list.boundingBox())!;
     await window.mouse.move(box.x + box.width / 2, box.y + Math.min(box.height / 2, 80));
@@ -354,9 +387,9 @@ test("large changed-file lists scroll with bounded row layout and expandable cov
     await expect(lastReviewed).toHaveAccessibleName("Mark file-1999.txt reviewed");
     await lastRow.locator(".diff-panel__file-name").focus();
     await window.keyboard.press("Enter");
-    await expect(
-      panel.getByRole("region", { name: "Combined changes", exact: true }),
-    ).toContainText("source 1999");
+    await expect(panel.getByRole("region", { name: "Diff", exact: true })).toContainText(
+      "source 1999",
+    );
     await expect(lastRow).toBeInViewport();
     await lastReviewed.click();
     try {

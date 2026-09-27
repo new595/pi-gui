@@ -5,6 +5,7 @@ import {
   dialog,
   Menu,
   nativeImage,
+  nativeTheme,
   protocol,
   shell,
   type MenuItemConstructorOptions,
@@ -54,6 +55,7 @@ import { NotificationManager } from "./platform/notification-manager";
 import { NotificationPermissionService } from "./platform/notification-permission";
 import { checkForUpdate, initUpdateChecker, openReleasesPage } from "./platform/update-checker";
 import { ThemeManager } from "./platform/theme-manager";
+import { windowBackgroundFor } from "../contracts/theme";
 import { TerminalService } from "./platform/terminal-service";
 import {
   interfaceZoomLevels,
@@ -67,6 +69,7 @@ import {
   getDesktopCommandFromShortcut,
   isSinglePressCommand,
   isCloseFocusedSurfaceShortcut,
+  getSidePanelTabCommand,
   platformShortcutModifier,
 } from "../contracts/ipc";
 import {
@@ -384,6 +387,26 @@ function dispatchCloseFocusedSurface(window: BrowserWindow, event: Electron.Even
   window.webContents.send(desktopIpc.appCommand, desktopCommands.closeFocusedSurface);
 }
 
+// The native window colour matches the renderer's theme, so load, reload and
+// resize never flash another theme's colour.
+function currentWindowBackground(): string {
+  return windowBackgroundFor(
+    store?.snapshot().themePresetId ?? "default",
+    themeManager.getResolvedTheme(),
+  );
+}
+
+// Windows created transparent keep their glass until the next launch.
+const opaqueAppWindows = new Set<BrowserWindow>();
+
+function refreshWindowBackgrounds(): void {
+  if (!store) return;
+  const color = currentWindowBackground();
+  for (const window of opaqueAppWindows) {
+    if (!window.isDestroyed()) window.setBackgroundColor(color);
+  }
+}
+
 function createWindow(): BrowserWindow {
   const backgroundTestMode = windowTestMode === "background";
   const enableTransparency = store ? store.snapshot().enableTransparency : false;
@@ -396,7 +419,7 @@ function createWindow(): BrowserWindow {
     vibrancy: process.platform === "darwin" && enableTransparency ? "under-window" : undefined,
     titleBarStyle: "hiddenInset",
     autoHideMenuBar: process.platform !== "darwin",
-    backgroundColor: enableTransparency ? "#00000000" : "#f3f4f8",
+    backgroundColor: enableTransparency ? "#00000000" : currentWindowBackground(),
     trafficLightPosition: { x: 18, y: 18 },
     show: false,
     icon: appIcon,
@@ -456,6 +479,17 @@ function createWindow(): BrowserWindow {
   });
   window.webContents.on("before-input-event", (event, input) => {
     if (input.type !== "keyDown") {
+      return;
+    }
+
+    // Side panel tab chords act from the terminal and extension views too. The
+    // key is not consumed: that would also swallow the modifier's keyup, leaving
+    // the tab hints up, and on Windows and Linux it would let the Alt release
+    // open the hidden menu bar. The page takes no default action for these keys,
+    // and the renderer's own handling of the same keydown is idempotent.
+    const sidePanelTabCommand = getSidePanelTabCommand(process.platform, input);
+    if (sidePanelTabCommand) {
+      if (!input.isAutoRepeat) window.webContents.send(desktopIpc.appCommand, sidePanelTabCommand);
       return;
     }
 
@@ -556,6 +590,11 @@ function createWindow(): BrowserWindow {
     void window.loadURL(appRendererUrl()).catch((error: unknown) => {
       console.error("[main] loadURL failed", error);
     });
+  }
+
+  if (!enableTransparency) {
+    opaqueAppWindows.add(window);
+    window.once("closed", () => opaqueAppWindows.delete(window));
   }
 
   return window;
@@ -802,8 +841,12 @@ function installApplicationMenu(): void {
     {
       label: "View",
       submenu: [
-        { role: "reload" },
-        // Shift+Cmd+R renames the thread, so Force Reload has no shortcut.
+        // Cmd+R toggles Review and Shift+Cmd+R renames the thread, so neither
+        // reload has a shortcut.
+        {
+          label: "Reload",
+          click: () => BrowserWindow.getFocusedWindow()?.webContents.reload(),
+        },
         {
           label: "Force Reload",
           click: () => BrowserWindow.getFocusedWindow()?.webContents.reloadIgnoringCache(),
@@ -953,24 +996,24 @@ app
         onInvalidated: ({ target, generation }) =>
           extensionViews.invalidateRuntime(target, generation),
       },
-      extensionFactories: [
-        createOrchestrationRuntimeExtension(orchestrationRuntimeBridge),
-        createScheduledTaskRuntimeExtension(scheduledTaskRuntimeBridge, (ctx) => {
-          try {
-            return sessionRefFromExtensionContext(ctx).workspaceId;
-          } catch {
-            return undefined;
-          }
-        }),
-      ],
-      inlineExtensionMetadata: [
+      builtinExtensions: [
         {
+          name: "pi-gui-thread-orchestration",
           displayName: "Thread orchestration",
-          description: "Start child pi-gui threads from transcript tool calls",
+          description: "Lets pi start, read and message other pi-gui threads",
+          factory: createOrchestrationRuntimeExtension(orchestrationRuntimeBridge),
         },
         {
+          name: "pi-gui-scheduled-tasks",
           displayName: "Scheduled tasks",
-          description: "Create and update local pi-gui scheduled tasks from transcript tool calls",
+          description: "Lets pi create and update local pi-gui scheduled tasks",
+          factory: createScheduledTaskRuntimeExtension(scheduledTaskRuntimeBridge, (ctx) => {
+            try {
+              return sessionRefFromExtensionContext(ctx).workspaceId;
+            } catch {
+              return undefined;
+            }
+          }),
         },
       ],
     };
@@ -994,8 +1037,14 @@ app
     await store.initialize();
     themeManager.setMode(store.snapshot().themeMode);
     integratedTerminalShell = (await store.getState()).integratedTerminalShell;
+    nativeTheme.on("updated", refreshWindowBackgrounds);
+    let windowBackgroundPresetId = store.snapshot().themePresetId;
     stopPruningTerminals = store.subscribe((state) => {
       integratedTerminalShell = state.integratedTerminalShell;
+      if (state.themePresetId !== windowBackgroundPresetId) {
+        windowBackgroundPresetId = state.themePresetId;
+        refreshWindowBackgrounds();
+      }
       const workspacePaths = state.workspaces.map((workspace) => workspace.path);
       const workspacePathSignature = workspacePaths.join("\0");
       if (workspacePathSignature !== retainedTerminalWorkspacePathSignature) {

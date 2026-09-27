@@ -227,10 +227,8 @@ test("maintenance: skills, pin, thread list, worktree, queued follow-ups", async
       );
       expect(listed).toContain(selectedPath);
       expect(selectedPath).not.toBe(realpathSync(workspace));
-      await page
-        .getByRole("complementary")
-        .getByRole("button", { name: "New thread", exact: true })
-        .click();
+      // A thread still waiting for its title is also named "New thread" in Workspace grouping.
+      await page.locator(".sidebar__new").click();
       await expect(page.getByTestId("new-thread-composer")).toBeVisible();
       await expect(page.getByRole("button", { name: "Local", exact: true })).toBeVisible();
       await expect(page.getByRole("button", { name: "Worktree", exact: true })).toBeVisible();
@@ -265,6 +263,12 @@ test("maintenance: skills, pin, thread list, worktree, queued follow-ups", async
       await expect(assistant().filter({ hasText: "FOLLOW_UP_DONE" })).toHaveCount(1, {
         timeout: 180_000,
       });
+      const replies = await assistant().allTextContents();
+      const steerIndex = replies.findIndex((text) => text.includes("STEER_DONE"));
+      expect(steerIndex, "the steered reply is still mounted").toBeGreaterThanOrEqual(0);
+      expect(steerIndex, "the steered reply precedes the queued follow-up").toBeLessThan(
+        replies.findIndex((text) => text.includes("FOLLOW_UP_DONE")),
+      );
       await expect(assistant().filter({ hasText: "BASELINE_DONE" })).toHaveCount(0);
       await expect(page.getByTestId("queued-composer-messages")).toHaveCount(0);
       await expect(page.locator(".session-row--active")).not.toHaveAttribute(

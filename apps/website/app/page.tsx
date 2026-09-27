@@ -40,12 +40,12 @@ const showcase = [
   {
     eyebrow: "Review",
     title: "Review every change before it lands",
-    body: "The Changes tab shows exactly what the agent touched. Compare uncommitted work, a branch against its base, or a single turn, and stage it file by file.",
+    body: "The Review tab shows exactly what the agent touched. Compare uncommitted work, a branch against its base, or a single turn, and stage it file by file.",
     shot: "review",
     width: 1240,
     height: 758,
     dark: true,
-    alt: "The Changes tab showing the diff an agent made to src/price.js",
+    alt: "The Review tab showing the diff an agent made to src/price.js",
   },
   {
     eyebrow: "Workbench",
@@ -198,7 +198,7 @@ export default function Page() {
         <section className="hero">
           <div className="container">
             <a className="hero__badge" href={RELEASES_URL}>
-              Public beta for macOS, Linux and Windows
+              Free and open source for macOS, Linux and Windows
               <span aria-hidden="true">→</span>
             </a>
             <h1>The desktop app for the pi coding agent</h1>
@@ -276,7 +276,7 @@ export default function Page() {
 
         <section id="install" className="install">
           <div className="container">
-            <h2 className="section-title">Install the beta</h2>
+            <h2 className="section-title">Install pi-gui</h2>
             <p className="section-lede">
               Download the latest build from <a href={RELEASES_URL}>GitHub Releases</a>, or install
               with Homebrew on macOS. Then connect a provider under Settings, add a project folder
