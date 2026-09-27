@@ -426,6 +426,7 @@ export function SecondarySurfaces({
           themeMode={snapshot.themeMode}
           themePresetId={snapshot.themePresetId}
           enableTransparency={snapshot.enableTransparency}
+          interfaceZoom={snapshot.interfaceZoom}
           onLoginProvider={handleLoginProvider}
           onSelectSection={onSelectSettingsSection}
           onLogoutProvider={handleLogoutProvider}
@@ -449,6 +450,11 @@ export function SecondarySurfaces({
               (error: unknown) => {
                 console.error("[renderer] setEnableTransparency failed", error);
               },
+            );
+          }}
+          onSetInterfaceZoom={(zoom) => {
+            void updateSnapshot(setSnapshot, () => api.setInterfaceZoom(zoom)).catch(
+              (error: unknown) => console.error("[renderer] setInterfaceZoom failed", error),
             );
           }}
         />

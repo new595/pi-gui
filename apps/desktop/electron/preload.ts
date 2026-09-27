@@ -380,6 +380,8 @@ contextBridge.exposeInMainWorld("piApp", {
     ) as Promise<DesktopAppState>,
   setEnableTransparency: (enabled: boolean) =>
     ipcRenderer.invoke(desktopIpc.setEnableTransparency, enabled) as Promise<DesktopAppState>,
+  setInterfaceZoom: (zoom: 90 | 100 | 110 | 125 | 150) =>
+    ipcRenderer.invoke(desktopIpc.setInterfaceZoom, zoom) as Promise<DesktopAppState>,
   setThemePresetId: (presetId: ThemePresetId) =>
     ipcRenderer.invoke(desktopIpc.setThemePresetId, presetId) as Promise<DesktopAppState>,
   ensureTerminalPanel: (

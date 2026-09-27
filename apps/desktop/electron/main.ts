@@ -55,7 +55,12 @@ import { NotificationPermissionService } from "./platform/notification-permissio
 import { checkForUpdate, initUpdateChecker, openReleasesPage } from "./platform/update-checker";
 import { ThemeManager } from "./platform/theme-manager";
 import { TerminalService } from "./platform/terminal-service";
-import type { DesktopAppState, DesktopAppViewState } from "../contracts/desktop-state";
+import {
+  interfaceZoomLevels,
+  type DesktopAppState,
+  type DesktopAppViewState,
+  type InterfaceZoom,
+} from "../contracts/desktop-state";
 import {
   desktopCommands,
   desktopIpc,
@@ -402,6 +407,7 @@ function createWindow(): BrowserWindow {
       sandbox: true,
       // Keep hidden test windows responsive so Playwright exercises the same UI flows.
       backgroundThrottling: !backgroundTestMode,
+      zoomFactor: (store?.snapshot().interfaceZoom ?? 100) / 100,
     },
   });
 
@@ -454,6 +460,21 @@ function createWindow(): BrowserWindow {
     }
 
     const lowerKey = input.key.toLowerCase();
+    const webContentsId = window.webContents.id;
+    const terminalFocused = terminalFocusedWebContentsIds.has(webContentsId);
+    const zoomModifier = process.platform === "darwin" ? input.meta : input.control;
+    if (
+      zoomModifier &&
+      !input.alt &&
+      (!input.shift || input.key === "+") &&
+      ["0", "-", "=", "+"].includes(input.key) &&
+      !terminalFocused
+    ) {
+      event.preventDefault();
+      if (input.key === "0") setInterfaceZoomFromMenu(100);
+      else stepInterfaceZoom(input.key === "-" ? -1 : 1);
+      return;
+    }
     const platformModifier = platformShortcutModifier(process.platform, input);
     const command = getDesktopCommandFromShortcut({
       modifier: platformModifier,
@@ -462,8 +483,6 @@ function createWindow(): BrowserWindow {
       key: input.key,
       code: input.code,
     });
-    const webContentsId = window.webContents.id;
-    const terminalFocused = terminalFocusedWebContentsIds.has(webContentsId);
     const closeFocusedSurface =
       isCloseFocusedSurfaceShortcut({
         meta: input.meta,
@@ -697,6 +716,24 @@ async function runManualUpdateCheck(): Promise<void> {
   }
 }
 
+function setInterfaceZoomFromMenu(zoom: InterfaceZoom): void {
+  void store
+    .setInterfaceZoom(zoom)
+    .then((state) => {
+      windowOwner.setInterfaceZoom(state.interfaceZoom);
+    })
+    .catch((error: unknown) => console.error("[main] interface zoom menu failed", error));
+}
+
+function stepInterfaceZoom(direction: -1 | 1): void {
+  const current = store?.snapshot().interfaceZoom ?? 100;
+  const index = interfaceZoomLevels.indexOf(current);
+  const next =
+    interfaceZoomLevels[Math.max(0, Math.min(interfaceZoomLevels.length - 1, index + direction))] ??
+    100;
+  setInterfaceZoomFromMenu(next);
+}
+
 function installApplicationMenu(): void {
   if (process.platform !== "darwin") {
     return;
@@ -773,9 +810,21 @@ function installApplicationMenu(): void {
         },
         { role: "toggleDevTools" },
         { type: "separator" },
-        { role: "resetZoom" },
-        { role: "zoomIn" },
-        { role: "zoomOut" },
+        {
+          label: "Reset Interface Zoom",
+          accelerator: "CommandOrControl+0",
+          click: () => setInterfaceZoomFromMenu(100),
+        },
+        {
+          label: "Zoom In",
+          accelerator: "CommandOrControl+=",
+          click: () => stepInterfaceZoom(1),
+        },
+        {
+          label: "Zoom Out",
+          accelerator: "CommandOrControl+-",
+          click: () => stepInterfaceZoom(-1),
+        },
         { type: "separator" },
         { role: "togglefullscreen" },
       ],

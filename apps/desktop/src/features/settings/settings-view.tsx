@@ -7,6 +7,7 @@ import type {
   ModelSettingsScopeMode,
   NotificationPreferences,
   ThemePresetId,
+  InterfaceZoom,
   WorkspaceRecord,
 } from "../../../contracts/desktop-state";
 import type {
@@ -39,6 +40,7 @@ interface SettingsViewProps {
   readonly themeMode: "system" | "light" | "dark";
   readonly themePresetId: ThemePresetId;
   readonly enableTransparency: boolean;
+  readonly interfaceZoom: InterfaceZoom;
   readonly onSetModelSettingsScopeMode: (mode: ModelSettingsScopeMode) => void;
   readonly onSetDefaultModel: (provider: string, modelId: string) => void;
   readonly onSetThinkingLevel: (
@@ -59,6 +61,7 @@ interface SettingsViewProps {
   readonly onSetThemeMode: (mode: "system" | "light" | "dark") => void;
   readonly onSetThemePresetId: (presetId: ThemePresetId) => void;
   readonly onSetEnableTransparency: (enabled: boolean) => void;
+  readonly onSetInterfaceZoom: (zoom: InterfaceZoom) => void;
 }
 
 export function SettingsView({
@@ -76,6 +79,7 @@ export function SettingsView({
   themeMode,
   themePresetId,
   enableTransparency,
+  interfaceZoom,
   onSetModelSettingsScopeMode,
   onSetDefaultModel,
   onSetThinkingLevel,
@@ -94,6 +98,7 @@ export function SettingsView({
   onSetThemeMode,
   onSetThemePresetId,
   onSetEnableTransparency,
+  onSetInterfaceZoom,
 }: SettingsViewProps) {
   const definition = settingsSectionDefinition(section);
   const header = (
@@ -142,6 +147,8 @@ export function SettingsView({
               onSetThemePresetId={onSetThemePresetId}
               enableTransparency={enableTransparency}
               onSetEnableTransparency={onSetEnableTransparency}
+              interfaceZoom={interfaceZoom}
+              onSetInterfaceZoom={onSetInterfaceZoom}
             />
           ) : null}
 

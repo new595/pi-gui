@@ -25,6 +25,11 @@ export type WorkspaceKind = "primary" | "worktree";
 export type WorktreeStatus = "ready" | "missing" | "error";
 export type NewThreadEnvironment = "local" | "worktree";
 export type ThemeMode = "system" | "light" | "dark";
+export const interfaceZoomLevels = [90, 100, 110, 125, 150] as const;
+export type InterfaceZoom = (typeof interfaceZoomLevels)[number];
+export function isInterfaceZoom(value: unknown): value is InterfaceZoom {
+  return typeof value === "number" && interfaceZoomLevels.includes(value as InterfaceZoom);
+}
 export const themePresetIds = [
   "default",
   "catppuccin",
@@ -351,6 +356,7 @@ export interface DesktopAppState {
   readonly sidebarCollapsed: boolean;
   readonly threadGrouping: ThreadGrouping;
   readonly enableTransparency: boolean;
+  readonly interfaceZoom: InterfaceZoom;
   readonly startupDiagnostics: readonly StartupDiagnostic[];
   readonly revision: number;
   readonly lastError?: string;
@@ -404,6 +410,7 @@ export function createEmptyDesktopAppState(): DesktopAppState {
     sidebarCollapsed: false,
     threadGrouping: "time",
     enableTransparency: false,
+    interfaceZoom: 100,
     startupDiagnostics: [],
     revision: 0,
   };

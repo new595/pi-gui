@@ -6,6 +6,7 @@ import type {
   DesktopAppState,
   WorkspaceSessionTarget,
 } from "../../contracts/desktop-state";
+import { isInterfaceZoom } from "../../contracts/desktop-state";
 import {
   ComposerAttachmentLimitError,
   type ClipboardImageRead,
@@ -149,6 +150,7 @@ type SettingsOwner = Pick<
   | "setNotificationPreferences"
   | "setIntegratedTerminalShell"
   | "setEnableTransparency"
+  | "setInterfaceZoom"
   | "getSkillFilePath"
   | "getExtensionFilePath"
 >;
@@ -594,6 +596,19 @@ export function registerDesktopIpc({
       return state;
     });
   });
+  handleMainFrame(
+    desktopIpc.setInterfaceZoom,
+    (rawZoom) => {
+      if (!isInterfaceZoom(rawZoom)) throw new Error("Unsupported interface zoom");
+      return rawZoom;
+    },
+    (zoom, { window }) =>
+      windows.runUnscopedStateAction(window, async () => {
+        const state = await owners.settings.setInterfaceZoom(zoom);
+        windows.setInterfaceZoom(state.interfaceZoom);
+        return state;
+      }),
+  );
 
   registerTerminalIpc(windows, capabilities);
 

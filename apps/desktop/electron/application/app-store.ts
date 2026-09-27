@@ -58,11 +58,13 @@ import {
   type StartupDiagnostic,
   type ThemeMode,
   type ThemePresetId,
+  type InterfaceZoom,
   type ThreadGrouping,
   type TranscriptMessage,
   type WorkspaceSessionTarget,
   isThemeMode,
   isThemePresetId,
+  isInterfaceZoom,
   type CreateScheduledTaskInput,
   type ScheduledTaskRecord,
   type UpdateScheduledTaskInput,
@@ -81,9 +83,11 @@ import { StreamingUiPublisher } from "../conversation/streaming-ui-publisher";
 import type { RefreshStateOptions } from "./refresh-state-options";
 import {
   readPersistedUiState,
+  readPersistedInterfaceZoom,
   type LegacyPersistedUiState,
   type PersistedUiState,
   writePersistedUiState,
+  writePersistedInterfaceZoom,
 } from "../persistence/app-store-persistence";
 import { AttachmentStore } from "../persistence/attachment-store";
 import {
@@ -224,6 +228,7 @@ export class DesktopAppStore {
   private readonly worktreeManager: GitWorktreeManager;
   private readonly worktreeRoot: string;
   private readonly uiStateFilePath: string;
+  private readonly interfaceZoomFilePath: string;
   private readonly scheduledTasksFilePath: string;
   private scheduledTasksWritable = false;
   private readonly attachmentStore: AttachmentStore;
@@ -275,6 +280,7 @@ export class DesktopAppStore {
     this.worktreeManager = new GitWorktreeManager({ catalogStorage: this.catalogStore });
     this.worktreeRoot = join(options.userDataDir, "worktrees");
     this.uiStateFilePath = join(options.userDataDir, "ui-state.json");
+    this.interfaceZoomFilePath = join(options.userDataDir, "interface-zoom.json");
     this.scheduledTasksFilePath = join(options.userDataDir, "scheduled-tasks.json");
     this.attachmentStore = new AttachmentStore(options.userDataDir);
     this.initialWorkspacePaths = options.initialWorkspacePaths;
@@ -1327,6 +1333,22 @@ export class DesktopAppStore {
       revision: this.state.revision + 1,
     };
     await this.persistUiState();
+    return this.emit();
+  }
+
+  async setInterfaceZoom(interfaceZoom: InterfaceZoom): Promise<DesktopAppState> {
+    await this.initialize();
+    if (!isInterfaceZoom(interfaceZoom)) {
+      throw new Error(`Unsupported interface zoom: ${String(interfaceZoom)}`);
+    }
+    if (this.state.interfaceZoom === interfaceZoom) return structuredClone(this.state);
+    await writePersistedInterfaceZoom(this.interfaceZoomFilePath, interfaceZoom);
+    this.state = {
+      ...this.state,
+      interfaceZoom,
+      lastError: undefined,
+      revision: this.state.revision + 1,
+    };
     return this.emit();
   }
 
@@ -3581,7 +3603,15 @@ export class DesktopAppStore {
   }
 
   private async readUiState(): Promise<LegacyPersistedUiState> {
-    return readPersistedUiState(this.uiStateFilePath);
+    const persisted = await readPersistedUiState(this.uiStateFilePath);
+    let interfaceZoom: InterfaceZoom = 100;
+    try {
+      interfaceZoom = await readPersistedInterfaceZoom(this.interfaceZoomFilePath);
+    } catch (error) {
+      console.warn(`[app-store] could not read interface zoom; using 100%`, error);
+    }
+    this.state = { ...this.state, interfaceZoom };
+    return persisted;
   }
 
   async persistUiState(): Promise<void> {

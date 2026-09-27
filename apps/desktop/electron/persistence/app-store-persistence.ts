@@ -10,8 +10,14 @@ import type {
   ThemeMode,
   ThemePresetId,
   ThreadGrouping,
+  InterfaceZoom,
 } from "../../contracts/desktop-state";
-import { isThemeMode, isThemePresetId, isThreadGrouping } from "../../contracts/desktop-state";
+import {
+  isInterfaceZoom,
+  isThemeMode,
+  isThemePresetId,
+  isThreadGrouping,
+} from "../../contracts/desktop-state";
 import type { ModelSettingsSnapshot } from "@pi-gui/session-driver/runtime-types";
 import { readJsonWithBackup, writeFileAtomicQueued } from "./atomic-file-write";
 import { decodeAttachments } from "./attachment-store";
@@ -150,6 +156,51 @@ export async function writePersistedUiState(
       );
     },
   });
+}
+
+export async function readPersistedInterfaceZoom(filePath: string): Promise<InterfaceZoom> {
+  const result = await readJsonWithBackup(filePath);
+  if (result.value === undefined) {
+    if (result.corrupted) {
+      console.warn(`[app-store] corrupt interface zoom at ${filePath}; using 100%`);
+    }
+    return 100;
+  }
+  try {
+    const zoom = decodePersistedInterfaceZoom(result.value);
+    if (result.corrupted) {
+      console.warn(`[app-store] corrupt interface zoom at ${filePath}; recovered from backup`);
+    }
+    return zoom;
+  } catch {
+    console.warn(`[app-store] invalid interface zoom at ${filePath}; using 100%`);
+    return 100;
+  }
+}
+
+export function decodePersistedInterfaceZoom(value: unknown): InterfaceZoom {
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    !isInterfaceZoom((value as Record<string, unknown>).interfaceZoom)
+  ) {
+    throw new Error("Invalid persisted interface zoom");
+  }
+  return (value as Record<string, unknown>).interfaceZoom as InterfaceZoom;
+}
+
+export async function writePersistedInterfaceZoom(
+  filePath: string,
+  interfaceZoom: InterfaceZoom,
+): Promise<void> {
+  if (!isInterfaceZoom(interfaceZoom)) {
+    throw new Error(`Unsupported interface zoom: ${String(interfaceZoom)}`);
+  }
+  await writeFileAtomicQueued(
+    filePath,
+    `${JSON.stringify({ interfaceZoom }, null, 2)}\n`,
+    decodePersistedInterfaceZoom,
+  );
 }
 
 /** Layouts are per-task conveniences: one bad layout must not block the rest of saved UI state. */

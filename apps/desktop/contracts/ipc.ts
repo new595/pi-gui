@@ -43,6 +43,7 @@ import type {
   SelectedTranscriptRecord,
   StartThreadInput,
   ThemePresetId,
+  InterfaceZoom,
   ThreadGrouping,
   WorkspaceSessionTarget,
   CreateScheduledTaskInput,
@@ -143,6 +144,7 @@ export const desktopIpc = {
   setNotificationPreferences: "pi-gui:set-notification-preferences",
   setIntegratedTerminalShell: "pi-gui:set-integrated-terminal-shell",
   setEnableTransparency: "pi-gui:set-enable-transparency",
+  setInterfaceZoom: "pi-gui:set-interface-zoom",
   terminalEnsurePanel: "pi-gui:terminal-ensure-panel",
   terminalCreateSession: "pi-gui:terminal-create-session",
   terminalSetActiveSession: "pi-gui:terminal-set-active-session",
@@ -678,6 +680,7 @@ export interface PiDesktopApi {
   ): Promise<DesktopAppState>;
   setIntegratedTerminalShell(shell: string): Promise<DesktopAppState>;
   setEnableTransparency(enabled: boolean): Promise<DesktopAppState>;
+  setInterfaceZoom(zoom: InterfaceZoom): Promise<DesktopAppState>;
   setThemePresetId(presetId: ThemePresetId): Promise<DesktopAppState>;
   ensureTerminalPanel(
     workspaceId: string,

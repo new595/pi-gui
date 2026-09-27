@@ -5,6 +5,7 @@ import type {
   DesktopAppState,
   DesktopAppViewState,
   SelectedTranscriptRecord,
+  InterfaceZoom,
 } from "../../contracts/desktop-state";
 import { desktopIpc } from "../../contracts/ipc";
 import { SerializedActionQueue } from "./action-queue";
@@ -116,6 +117,15 @@ export class WindowOwner {
 
   allWindows(): readonly BrowserWindow[] {
     return [...this.windows];
+  }
+
+  setInterfaceZoom(zoom: InterfaceZoom): void {
+    const factor = zoom / 100;
+    for (const window of this.windows) {
+      if (canPublishToWindow(window) && window.webContents.getZoomFactor() !== factor) {
+        window.webContents.setZoomFactor(factor);
+      }
+    }
   }
 
   size(): number {

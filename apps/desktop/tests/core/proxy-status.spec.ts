@@ -1,4 +1,4 @@
-import { writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { mkdir } from "node:fs/promises";
 import { expect, test } from "@playwright/test";
@@ -14,10 +14,14 @@ import {
 
 const PACKAGED = process.env.PI_PROXY_PACKAGED === "1";
 const PACKAGED_EXECUTABLE =
-  process.env.PI_PROXY_EXECUTABLE ??
-  "F:\\Apps\\pi-gui-proxy\\versions\\0.1.0-beta.40-proxy.2\\pi-gui.exe";
+  process.env.PI_PROXY_EXECUTABLE ?? resolve("apps/desktop/release/win-unpacked/pi-gui.exe");
 
 test(`General renders the real startup proxy snapshot without exposing credentials (${PACKAGED ? "packaged" : "dev"})`, async () => {
+  const expectedLabel = (
+    JSON.parse(await readFile(resolve("apps/desktop/personal-build.json"), "utf8")) as {
+      readonly label: string;
+    }
+  ).label;
   const explicit = await showGeneralForSnapshot({
     name: "proxy-status-pi-settings",
     settings: { httpProxy: "http://synthetic-user:synthetic-password@proxy.example:3128" },
@@ -53,7 +57,7 @@ test(`General renders the real startup proxy snapshot without exposing credentia
     await expect(section).not.toContainText("synthetic-user");
     await expect(section).not.toContainText("synthetic-password");
     await expect(section).not.toContainText(explicit.settingsPath);
-    await expect(section).toContainText("proxy.2");
+    await expect(section).toContainText(expectedLabel);
     await expect(section.getByText(/^\d+\.\d+\.\d+/)).toBeVisible();
     await expect(section).toContainText("quit and restart");
     const screenshotPath = resolve(
