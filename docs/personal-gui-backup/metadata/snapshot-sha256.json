@@ -1,0 +1,370 @@
+{
+  "createdOn": "2026-10-11",
+  "files": [
+    {
+      "path": ".gitattributes",
+      "bytes": 90,
+      "sha256": "a3de5a47f871d9b120f96147ebccb5c3e81eec7c47d105599ace4f0a8e55f2fb"
+    },
+    {
+      "path": ".gitignore",
+      "bytes": 150,
+      "sha256": "348dc9633d290d7a3823e8f5f06a8746fe84d32625fff772e32235d3bf329d3f"
+    },
+    {
+      "path": "documents/assessment/GUI-维护路线评估-20261004.md",
+      "bytes": 8549,
+      "sha256": "4300d314ff8bdd27a1767a83bdc34ec153834ca159a9d5a5ea82f4f743893b4f"
+    },
+    {
+      "path": "documents/current/DOCUMENT-INDEX.md",
+      "bytes": 1864,
+      "sha256": "cd505724c2ce715d31866f1a8f4f8b4cf052e89b35998dda246e3610339bc5e9"
+    },
+    {
+      "path": "documents/current/LOCAL-AGENTS.md",
+      "bytes": 4324,
+      "sha256": "eeadd490bc724a05360b78e3f7903a4653be1bc73844527870f155ab112b58b4"
+    },
+    {
+      "path": "documents/current/PI-GUI-使用与维护.md",
+      "bytes": 9684,
+      "sha256": "e87c7b7912bd79ea3b88d484858bc2a858a33c0219c861d72cb75bbd3756f34b"
+    },
+    {
+      "path": "documents/history/extension-update-check-20260930/REPORT.md",
+      "bytes": 5081,
+      "sha256": "d4a352315cf0e975be62c10eea4a398e60e84500f9d3036231f6e56275d087d8"
+    },
+    {
+      "path": "documents/history/extension-update-check-20261001/REPORT.md",
+      "bytes": 6637,
+      "sha256": "d020795af7e785ac46061a1ff38ab855dfea0b1b0242110c841a4e3f955fa2c9"
+    },
+    {
+      "path": "documents/history/PI-GUI-开发与验收记录.md",
+      "bytes": 24870,
+      "sha256": "f7c738c0a9435eb9420bb8b84bc61998ea58ddcce5966d2b7cb1e03863fa2793"
+    },
+    {
+      "path": "documents/README.md",
+      "bytes": 412,
+      "sha256": "e5162de4b5255b18c19d65f145a0b2bcd537ebf8a51acd056fd03094c54ad51e"
+    },
+    {
+      "path": "extension-maintenance/licenses/4fu-pi-pwsh.LICENSE",
+      "bytes": 1061,
+      "sha256": "8008fbb4e3a1a2b3b201f32b0942d9a481eac6200a8878a6df5d38b93919a2bb"
+    },
+    {
+      "path": "extension-maintenance/licenses/juicesharp-rpiv-ask-user-question.LICENSE",
+      "bytes": 1067,
+      "sha256": "25d0d5e4e54033f939a9657109044f1d71a0b6e8db9adc400456ca9190df3fb1"
+    },
+    {
+      "path": "extension-maintenance/licenses/pi-subagents.LICENSE",
+      "bytes": 1068,
+      "sha256": "2d20dfacd9742706e564470dc77438608a1e54b0ed46959f080709389209093c"
+    },
+    {
+      "path": "extension-maintenance/patch-manager/manifest.json",
+      "bytes": 2274,
+      "sha256": "24572aee036991974766b127b1a523e181e5199581e79c584b74e0dd30077207"
+    },
+    {
+      "path": "extension-maintenance/patch-manager/patch-manager.mjs",
+      "bytes": 17437,
+      "sha256": "1928c90a6c9221445fef1e9708b857253fb01f6d963f1497fee933b0ccdf28c3"
+    },
+    {
+      "path": "extension-maintenance/patch-manager/README.md",
+      "bytes": 4956,
+      "sha256": "ba84c3f4ca29ab388c7c3c98a390fc9630027c725a50d51ec1cd3a41c0caf4ab"
+    },
+    {
+      "path": "extension-maintenance/patch-manager/verification/REPORT.md",
+      "bytes": 2412,
+      "sha256": "94808618884c7ad8a4d5737e3cb8c5d2fac2a908b6568b6c85721110ea7e7053"
+    },
+    {
+      "path": "extension-maintenance/patch-manager/verification/verify.mjs",
+      "bytes": 7952,
+      "sha256": "2d6f82cfa40e3429fdb1649e38cbcda6965790dc6f76e5267b019c2f5b158ee0"
+    },
+    {
+      "path": "extension-maintenance/patch-manager/检查补丁.cmd",
+      "bytes": 380,
+      "sha256": "44413ded9ab01bdbd2d7a75c4d01fdd60e3032cae7936f884e86abf567e95312"
+    },
+    {
+      "path": "extension-maintenance/pwsh-diagnosis/backup-0.10.0-20260927/task-launcher.mjs",
+      "bytes": 10546,
+      "sha256": "5680f36f2ff79d60c1bfcfeb556b144df99727c46490af933b23751ca5d95115"
+    },
+    {
+      "path": "extension-maintenance/pwsh-diagnosis/backup-0.10.0-20260927/task-runtime.ts",
+      "bytes": 25003,
+      "sha256": "8817b1b4d6b427d545264a0c29111e1271878749ebdf901c8683d808d1f35431"
+    },
+    {
+      "path": "extension-maintenance/pwsh-diagnosis/README.md",
+      "bytes": 3008,
+      "sha256": "117e1adf220163a898b9db0ee8232bd776717ac54cf34a97d6d5447bcee25e7d"
+    },
+    {
+      "path": "extension-maintenance/pwsh-diagnosis/smoke.mjs",
+      "bytes": 2109,
+      "sha256": "fbc2f6651528f9f1fdac8989b5d50a0103be92f1f683b63d60428526182fa269"
+    },
+    {
+      "path": "extension-maintenance/pwsh-diagnosis/task-launcher.mjs",
+      "bytes": 10932,
+      "sha256": "52dda0a0003e1b6088f542bf87f3f268e0fe61c5e3898d428d06567f18c14fd6"
+    },
+    {
+      "path": "extension-maintenance/pwsh-diagnosis/task-runtime.ts",
+      "bytes": 25409,
+      "sha256": "94e93fb851298d200a35ef292da60131e4123e769c17adbd595a22b3ead51fb5"
+    },
+    {
+      "path": "extension-maintenance/README.md",
+      "bytes": 996,
+      "sha256": "cbe2393ad962bca50b6322af08f8c92f0edbf22a38c07ecd52aae776ede04be1"
+    },
+    {
+      "path": "extension-maintenance/subagents-diagnosis/acceptance.mts",
+      "bytes": 5569,
+      "sha256": "0861b293328b4760e3668d14c849e2065cb6cc73daea53aa86311dda5561f296"
+    },
+    {
+      "path": "extension-maintenance/subagents-diagnosis/all-extensions-acceptance.mts",
+      "bytes": 6824,
+      "sha256": "687403fe5ff2569221a842d622522d68e22986512875a1d2f4271f9a227540e4"
+    },
+    {
+      "path": "extension-maintenance/subagents-diagnosis/ask-repair/ask-user-question.before.ts",
+      "bytes": 19485,
+      "sha256": "3259729a00ba3fcab4b626b8525fb5b25c76a9583c1b97d51d0e1c6aedad3c26"
+    },
+    {
+      "path": "extension-maintenance/subagents-diagnosis/ask-repair/ask-user-question.patched.ts",
+      "bytes": 20321,
+      "sha256": "8ed9621af8e97f5779c6dd989b4c3ba30a9a48b1d20df0b61a915eb427044f34"
+    },
+    {
+      "path": "extension-maintenance/subagents-diagnosis/ask-repair/boundary-check.mjs",
+      "bytes": 3812,
+      "sha256": "835b6ddbc15e727b98d1e83e55734901194272c80789b3e05658a55effc44895"
+    },
+    {
+      "path": "extension-maintenance/subagents-diagnosis/ask-repair/README.md",
+      "bytes": 3780,
+      "sha256": "f6b544ee58d0290d280e616ffd42f348baa2e3f224a62393e304cab614a0994d"
+    },
+    {
+      "path": "extension-maintenance/subagents-diagnosis/ask-repair/verification/acceptance.mts",
+      "bytes": 8360,
+      "sha256": "f2ba45d46eea7be7b4afee510c49c2901841c4d54b6839cc5ea3b7c54fedd54e"
+    },
+    {
+      "path": "extension-maintenance/subagents-diagnosis/ask-repair/verification/fixture/index.mjs",
+      "bytes": 4133,
+      "sha256": "50b8167383a836d3703718ec1a5c24d4630419915957f88ed1d12bcf3d18032a"
+    },
+    {
+      "path": "extension-maintenance/subagents-diagnosis/background-proxy-repair/implementation.md",
+      "bytes": 2663,
+      "sha256": "fa3fb8608adbb389586c932d179591ab329989df32f39ccba93d69230dee26fa"
+    },
+    {
+      "path": "extension-maintenance/subagents-diagnosis/background-proxy-repair/live-runner-smoke.mjs",
+      "bytes": 4934,
+      "sha256": "b14876c1d54b9196d97c7ddfce251898f79c33b115aab883236fd5434b0ffd75"
+    },
+    {
+      "path": "extension-maintenance/subagents-diagnosis/background-proxy-repair/runner-http-dispatcher.before.js",
+      "bytes": 5177,
+      "sha256": "1210dae21a53cb87c7d8356335bd932d1a26f8e6ba4d691124fc3dc641d325e6"
+    },
+    {
+      "path": "extension-maintenance/subagents-diagnosis/background-proxy-repair/runner-http-dispatcher.js",
+      "bytes": 8207,
+      "sha256": "00b322e44ee01427c25c11ca8c33bf9860b50631a6c69215c5720ea388980518"
+    },
+    {
+      "path": "extension-maintenance/subagents-diagnosis/background-proxy-repair/verification/README.md",
+      "bytes": 1129,
+      "sha256": "937e6c521e6097708c0d62cedc0ab7f14ad2cebe9d24b9c64fe9b368cabb3891"
+    },
+    {
+      "path": "extension-maintenance/subagents-diagnosis/background-proxy-repair/verification/report.md",
+      "bytes": 3036,
+      "sha256": "46bfece2ced3c3a7cd09fcd207afb6dc8e5d5115b452fc8897583031bd8e7bac"
+    },
+    {
+      "path": "extension-maintenance/subagents-diagnosis/background-proxy-repair/verification/verify-background-proxy.mjs",
+      "bytes": 9629,
+      "sha256": "b073956755e54b170e0196ffed5e55b8a65c1a1c1604def03060e8792b3300aa"
+    },
+    {
+      "path": "extension-maintenance/subagents-diagnosis/dependency-repair.md",
+      "bytes": 5692,
+      "sha256": "ce5e5cebf77291d666eb5275ca4036e3259f4b4162ac11f55b0a73f076bfbff1"
+    },
+    {
+      "path": "extension-maintenance/subagents-diagnosis/gui-acceptance.md",
+      "bytes": 3426,
+      "sha256": "a3396a3bcd8d2e1275966291253aebb18f94316538094a15185dbb7c527a178e"
+    },
+    {
+      "path": "extension-maintenance/subagents-diagnosis/other-extensions/acceptance.mts",
+      "bytes": 4336,
+      "sha256": "58ffe8b76c38705d8e496e02aec732b84a4b2da5f0c31115116272dbcd4f08ec"
+    },
+    {
+      "path": "extension-maintenance/subagents-diagnosis/other-extensions/fixture/index.mjs",
+      "bytes": 6619,
+      "sha256": "7a73f01d891a3e871e0d5c653dced43190d0f64cfca12f4d156dd141f21eddae"
+    },
+    {
+      "path": "extension-maintenance/subagents-diagnosis/other-extensions/report.md",
+      "bytes": 5190,
+      "sha256": "696f5a3a11156e5443a36192b6c365ef0eeeb10ffdd92aac50aa947793080dc1"
+    },
+    {
+      "path": "extension-maintenance/subagents-diagnosis/package-lock.after.json",
+      "bytes": 245374,
+      "sha256": "7afef6c0b1ca7dd39fbfe21a59f807b1082596e257384f2a1507042b247825de"
+    },
+    {
+      "path": "extension-maintenance/subagents-diagnosis/package-lock.before.json",
+      "bytes": 112963,
+      "sha256": "b58da7d9fad46e5a49485c7f06d32fefcd489abf56a3e5adf4b1577e3a08af15"
+    },
+    {
+      "path": "extension-maintenance/subagents-diagnosis/package.after.json",
+      "bytes": 435,
+      "sha256": "7d3bb7b4ef547af031ad61e6a5fffaddf3731e3086a736499b59295a7b5a614d"
+    },
+    {
+      "path": "extension-maintenance/subagents-diagnosis/package.before.json",
+      "bytes": 260,
+      "sha256": "9aa3f4e796c123a707bb884c77a5c4463f07d85783db2b7d5a0c9a84c0fd930d"
+    },
+    {
+      "path": "extension-maintenance/subagents-diagnosis/pi-pwsh-index.before.ts",
+      "bytes": 21604,
+      "sha256": "ed68618fa5f90b2401fd5df8b5f7547d79c04315ec4d3692d63158c4a9f599b7"
+    },
+    {
+      "path": "extension-maintenance/subagents-diagnosis/pi-subagents-package.before.json",
+      "bytes": 3508,
+      "sha256": "12ddb98564785d4d012c308a07fe286aa2f0d463fe8af70012813af4cf17e193"
+    },
+    {
+      "path": "extension-maintenance/subagents-diagnosis/README.md",
+      "bytes": 4440,
+      "sha256": "7d8483667f3591936e7fa0aa69f6841814a1085279aef0d55ace6861f84c159e"
+    },
+    {
+      "path": "extension-maintenance/subagents-diagnosis/slash-commands.before.js",
+      "bytes": 47664,
+      "sha256": "671127fb56c4af93d0a19cef24521879d2260aaa5605e0be5d0dc671fba9c576"
+    },
+    {
+      "path": "extension-maintenance/subagents-diagnosis/slash-commands.patched.js",
+      "bytes": 48088,
+      "sha256": "34a0996a3413e427d0221646e530f3ddd5f4a15b0ba10e1f4f6db39698136395"
+    },
+    {
+      "path": "extension-maintenance/subagents-diagnosis/task-launcher.before.mjs",
+      "bytes": 10932,
+      "sha256": "52dda0a0003e1b6088f542bf87f3f268e0fe61c5e3898d428d06567f18c14fd6"
+    },
+    {
+      "path": "extension-maintenance/subagents-diagnosis/task-runtime.before.ts",
+      "bytes": 25409,
+      "sha256": "94e93fb851298d200a35ef292da60131e4123e769c17adbd595a22b3ead51fb5"
+    },
+    {
+      "path": "extension-maintenance/THIRD-PARTY-NOTICES.json",
+      "bytes": 958,
+      "sha256": "bd7e9218f0432c0e20599f213cb63f7d58b0e78df6bad0b2e2bf41e6ef24cc0e"
+    },
+    {
+      "path": "launcher/pi-gui-proxy.cmd",
+      "bytes": 170,
+      "sha256": "a37c0d794814626eda2ce4d396b32f7faf564d1d12e5028fcee739f947178521"
+    },
+    {
+      "path": "metadata/file-manifest.json",
+      "bytes": 22378,
+      "sha256": "76dbb320ccff957a7bccc111783a2bfe42ef3c207c935edc9051304713ba9fcf"
+    },
+    {
+      "path": "metadata/installed-build.json",
+      "bytes": 412,
+      "sha256": "720c921df659bdf55bb530a2268ebdb76cf579be2379bcffe357623bf53d05f9"
+    },
+    {
+      "path": "README.md",
+      "bytes": 2588,
+      "sha256": "48572afe79f5c88c31b8f680c57db17c2501f64274dd287cc17bdf3c6e6ab020"
+    },
+    {
+      "path": "RESTORE.md",
+      "bytes": 3973,
+      "sha256": "9f7e939c8e6d2db24ceea656e3c9ac22aa93d72f6dcfeede3227cbce484b8ca7"
+    },
+    {
+      "path": "source-patches/proxy-patches/0001-feat-desktop-honor-Pi-proxy-settings-for-provider-tr.patch",
+      "bytes": 13875,
+      "sha256": "2f5f89c1f660723d0b5f41fe8d55bedacfa2c40bd535577571989dcc06ee28c9"
+    },
+    {
+      "path": "source-patches/proxy-patches/0002-test-desktop-verify-proxied-transports-and-real-prov.patch",
+      "bytes": 49717,
+      "sha256": "1d746888a27a169f18e91c964bdcf5acc02feebb7fe2a0e43829e8d999032a9a"
+    },
+    {
+      "path": "source-patches/proxy-patches/0003-docs-document-personal-proxy-build-and-verification-.patch",
+      "bytes": 13543,
+      "sha256": "6ea4899bfef589746dff638d416ef1d239b27064bb1575ce3f01c564a554bd43"
+    },
+    {
+      "path": "source-patches/proxy-patches-phase2/0001-feat-desktop-show-personal-build-and-safe-proxy-stat.patch",
+      "bytes": 46509,
+      "sha256": "5e8c636b0777b8082c8b65b63635d894ec6acf0b145243825a81c5b888f3143e"
+    },
+    {
+      "path": "source-patches/proxy-patches-phase2/0002-feat-windows-add-stable-personal-launcher-and-rollba.patch",
+      "bytes": 26584,
+      "sha256": "93e2c8cdef50fe9bb66f48188b711b4bd4dcee27a63f86d26bf72688f2f0e55b"
+    },
+    {
+      "path": "source-patches/proxy-patches-phase3/0001-feat-desktop-persist-adjustable-interface-zoom.patch",
+      "bytes": 42629,
+      "sha256": "ba0734691626d16fd742140dea20c92a762c40b9c1d3cbabc6e746633a95e1e5"
+    },
+    {
+      "path": "source-patches/proxy-patches-phase3/0002-docs-record-proxy.3-zoom-acceptance-and-preserve-tes.patch",
+      "bytes": 4515,
+      "sha256": "b67678dc4dbfb916498d0d0513af556bb86684148f67d9d00e4ee35e78eb3d9a"
+    },
+    {
+      "path": "source-patches/proxy-patches-v1.0.1/personal-changes-on-v1.0.1.patch",
+      "bytes": 186277,
+      "sha256": "f57bde41e6e36f135bb605a1500eb02a39dbf487ac2bd97debd36b5556b07992"
+    },
+    {
+      "path": "source-patches/proxy-patches-v1.0.1/README.md",
+      "bytes": 1162,
+      "sha256": "19cf8c746f0830c8d9545ab90d84ec3e70aeff0506f7b9d8855d57a8e9ac086e"
+    },
+    {
+      "path": "source-patches/README.md",
+      "bytes": 699,
+      "sha256": "800c903e58350e10f58179e1a7cf495b8af6c2e7d37ae27d168b85d7b5ea9248"
+    }
+  ]
+}

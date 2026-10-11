@@ -1,0 +1,4218 @@
+diff --git a/apps/desktop/contracts/desktop-state.ts b/apps/desktop/contracts/desktop-state.ts
+index c89b479..e155a9d 100644
+--- a/apps/desktop/contracts/desktop-state.ts
++++ b/apps/desktop/contracts/desktop-state.ts
+@@ -25,6 +25,11 @@ export type WorkspaceKind = "primary" | "worktree";
+ export type WorktreeStatus = "ready" | "missing" | "error";
+ export type NewThreadEnvironment = "local" | "worktree";
+ export type ThemeMode = "system" | "light" | "dark";
++export const interfaceZoomLevels = [90, 100, 110, 125, 150] as const;
++export type InterfaceZoom = (typeof interfaceZoomLevels)[number];
++export function isInterfaceZoom(value: unknown): value is InterfaceZoom {
++  return typeof value === "number" && interfaceZoomLevels.includes(value as InterfaceZoom);
++}
+ export const themePresetIds = [
+   "default",
+   "catppuccin",
+@@ -353,6 +358,7 @@ export interface DesktopAppState {
+   readonly sidebarCollapsed: boolean;
+   readonly threadGrouping: ThreadGrouping;
+   readonly enableTransparency: boolean;
++  readonly interfaceZoom: InterfaceZoom;
+   readonly startupDiagnostics: readonly StartupDiagnostic[];
+   readonly revision: number;
+   readonly lastError?: string;
+@@ -407,6 +413,7 @@ export function createEmptyDesktopAppState(): DesktopAppState {
+     sidebarCollapsed: false,
+     threadGrouping: "time",
+     enableTransparency: false,
++    interfaceZoom: 100,
+     startupDiagnostics: [],
+     revision: 0,
+   };
+diff --git a/apps/desktop/contracts/ipc.ts b/apps/desktop/contracts/ipc.ts
+index 3204251..9523246 100644
+--- a/apps/desktop/contracts/ipc.ts
++++ b/apps/desktop/contracts/ipc.ts
+@@ -13,6 +13,7 @@ import type {
+   SessionTreeSnapshot,
+ } from "@pi-gui/session-driver/types";
+ import type { ClipboardImageRead } from "./composer-attachments";
++import type { DesktopProxyStatus } from "./proxy-status";
+ import type { SessionRef } from "@pi-gui/session-driver/types";
+ import type { SaveTaskWorkbenchTemplateInput, TaskWorkbenchTemplate } from "./workbench";
+ import type {
+@@ -42,6 +43,7 @@ import type {
+   SelectedTranscriptRecord,
+   StartThreadInput,
+   ThemePresetId,
++  InterfaceZoom,
+   ThreadGrouping,
+   WorkspaceSessionTarget,
+   CreateScheduledTaskInput,
+@@ -142,6 +144,7 @@ export const desktopIpc = {
+   setNotificationPreferences: "pi-gui:set-notification-preferences",
+   setIntegratedTerminalShell: "pi-gui:set-integrated-terminal-shell",
+   setEnableTransparency: "pi-gui:set-enable-transparency",
++  setInterfaceZoom: "pi-gui:set-interface-zoom",
+   terminalEnsurePanel: "pi-gui:terminal-ensure-panel",
+   terminalCreateSession: "pi-gui:terminal-create-session",
+   terminalSetActiveSession: "pi-gui:terminal-set-active-session",
+@@ -158,6 +161,8 @@ export const desktopIpc = {
+   getNotificationPermissionStatus: "pi-gui:get-notification-permission-status",
+   requestNotificationPermission: "pi-gui:request-notification-permission",
+   openSystemNotificationSettings: "pi-gui:open-system-notification-settings",
++  getProxyStatus: "pi-gui:get-proxy-status",
++  openProxySettings: "pi-gui:open-proxy-settings",
+   notificationPermissionStatusChanged: "pi-gui:notification-permission-status-changed",
+   pickComposerAttachments: "pi-gui:pick-composer-attachments",
+   readClipboardImage: "pi-gui:read-clipboard-image",
+@@ -752,6 +757,7 @@ export interface PiDesktopApi {
+   ): Promise<DesktopAppState>;
+   setIntegratedTerminalShell(shell: string): Promise<DesktopAppState>;
+   setEnableTransparency(enabled: boolean): Promise<DesktopAppState>;
++  setInterfaceZoom(zoom: InterfaceZoom): Promise<DesktopAppState>;
+   setThemePresetId(presetId: ThemePresetId): Promise<DesktopAppState>;
+   ensureTerminalPanel(
+     workspaceId: string,
+@@ -784,6 +790,8 @@ export interface PiDesktopApi {
+   getNotificationPermissionStatus(): Promise<DesktopNotificationPermissionStatus>;
+   requestNotificationPermission(): Promise<DesktopNotificationPermissionStatus>;
+   openSystemNotificationSettings(): Promise<void>;
++  getProxyStatus(): Promise<DesktopProxyStatus>;
++  openProxySettings(): Promise<string | undefined>;
+   onNotificationPermissionStatusChanged(
+     callback: (status: DesktopNotificationPermissionStatus) => void,
+   ): () => void;
+diff --git a/apps/desktop/contracts/proxy-status.ts b/apps/desktop/contracts/proxy-status.ts
+new file mode 100644
+index 0000000..9fecdf0
+--- /dev/null
++++ b/apps/desktop/contracts/proxy-status.ts
+@@ -0,0 +1,12 @@
++export interface ProxyStatusSnapshot {
++  source: "pi-settings" | "environment" | "direct";
++  httpProxy: string | null;
++  httpsProxy: string | null;
++  noProxy: string;
++  settingsPath: string;
++}
++
++export interface DesktopProxyStatus extends ProxyStatusSnapshot {
++  version: string;
++  buildLabel: string;
++}
+diff --git a/apps/desktop/electron/application/app-store.ts b/apps/desktop/electron/application/app-store.ts
+index 6cf8e00..e64d916 100644
+--- a/apps/desktop/electron/application/app-store.ts
++++ b/apps/desktop/electron/application/app-store.ts
+@@ -59,11 +59,13 @@ import {
+   type StartupDiagnostic,
+   type ThemeMode,
+   type ThemePresetId,
++  type InterfaceZoom,
+   type ThreadGrouping,
+   type TranscriptMessage,
+   type WorkspaceSessionTarget,
+   isThemeMode,
+   isThemePresetId,
++  isInterfaceZoom,
+   type CreateScheduledTaskInput,
+   type ScheduledTaskRecord,
+   type UpdateScheduledTaskInput,
+@@ -82,9 +84,11 @@ import { StreamingUiPublisher } from "../conversation/streaming-ui-publisher";
+ import type { RefreshStateOptions } from "./refresh-state-options";
+ import {
+   readPersistedUiState,
++  readPersistedInterfaceZoom,
+   type LegacyPersistedUiState,
+   type PersistedUiState,
+   writePersistedUiState,
++  writePersistedInterfaceZoom,
+ } from "../persistence/app-store-persistence";
+ import { AttachmentStore } from "../persistence/attachment-store";
+ import {
+@@ -224,6 +228,7 @@ export class DesktopAppStore {
+   private readonly worktreeRoot: string;
+   private readonly isAppWorktreePath: (path: string) => Promise<boolean>;
+   private readonly uiStateFilePath: string;
++  private readonly interfaceZoomFilePath: string;
+   private readonly scheduledTasksFilePath: string;
+   private scheduledTasksWritable = false;
+   private readonly attachmentStore: AttachmentStore;
+@@ -282,6 +287,7 @@ export class DesktopAppStore {
+       isAppWorktreePath: this.isAppWorktreePath,
+     });
+     this.uiStateFilePath = join(options.userDataDir, "ui-state.json");
++    this.interfaceZoomFilePath = join(options.userDataDir, "interface-zoom.json");
+     this.scheduledTasksFilePath = join(options.userDataDir, "scheduled-tasks.json");
+     this.attachmentStore = new AttachmentStore(options.userDataDir);
+     this.initialWorkspacePaths = options.initialWorkspacePaths;
+@@ -1348,6 +1354,22 @@ export class DesktopAppStore {
+     return this.emit();
+   }
+ 
++  async setInterfaceZoom(interfaceZoom: InterfaceZoom): Promise<DesktopAppState> {
++    await this.initialize();
++    if (!isInterfaceZoom(interfaceZoom)) {
++      throw new Error(`Unsupported interface zoom: ${String(interfaceZoom)}`);
++    }
++    if (this.state.interfaceZoom === interfaceZoom) return structuredClone(this.state);
++    await writePersistedInterfaceZoom(this.interfaceZoomFilePath, interfaceZoom);
++    this.state = {
++      ...this.state,
++      interfaceZoom,
++      lastError: undefined,
++      revision: this.state.revision + 1,
++    };
++    return this.emit();
++  }
++
+   async setThemeMode(themeMode: ThemeMode): Promise<DesktopAppState> {
+     await this.initialize();
+     if (!isThemeMode(themeMode)) {
+@@ -3665,7 +3687,15 @@ export class DesktopAppStore {
+   }
+ 
+   private async readUiState(): Promise<LegacyPersistedUiState> {
+-    return readPersistedUiState(this.uiStateFilePath);
++    const persisted = await readPersistedUiState(this.uiStateFilePath);
++    let interfaceZoom: InterfaceZoom = 100;
++    try {
++      interfaceZoom = await readPersistedInterfaceZoom(this.interfaceZoomFilePath);
++    } catch (error) {
++      console.warn(`[app-store] could not read interface zoom; using 100%`, error);
++    }
++    this.state = { ...this.state, interfaceZoom };
++    return persisted;
+   }
+ 
+   async persistUiState(): Promise<void> {
+diff --git a/apps/desktop/electron/ipc/register-desktop-ipc.ts b/apps/desktop/electron/ipc/register-desktop-ipc.ts
+index 2e6af98..6f98ecb 100644
+--- a/apps/desktop/electron/ipc/register-desktop-ipc.ts
++++ b/apps/desktop/electron/ipc/register-desktop-ipc.ts
+@@ -6,6 +6,7 @@ import type {
+   DesktopAppState,
+   WorkspaceSessionTarget,
+ } from "../../contracts/desktop-state";
++import { isInterfaceZoom } from "../../contracts/desktop-state";
+ import {
+   ComposerAttachmentLimitError,
+   type ClipboardImageRead,
+@@ -26,6 +27,7 @@ import type { DesktopExtensionViewOwner } from "../extensions/extension-view-own
+ import { registerExtensionViewRequests } from "./extension-view-requests";
+ import { registerReviewRequests, type ReviewRequestsOwner } from "./review-requests";
+ import { mainFrameHandler } from "./main-frame-ipc";
++import type { DesktopProxyStatus } from "../../contracts/proxy-status";
+ import { assertComposerAttachmentPixels } from "./composer-attachment-pixels";
+ import {
+   expectAppView,
+@@ -149,6 +151,7 @@ type SettingsOwner = Pick<
+   | "setNotificationPreferences"
+   | "setIntegratedTerminalShell"
+   | "setEnableTransparency"
++  | "setInterfaceZoom"
+   | "getSkillFilePath"
+   | "getExtensionFilePath"
+ >;
+@@ -166,6 +169,8 @@ export interface DesktopIpcOwners {
+ }
+ 
+ export interface DesktopIpcCapabilities {
++  readonly getProxyStatus: () => Promise<DesktopProxyStatus>;
++  readonly openProxySettings: () => Promise<string | undefined>;
+   readonly ping: () => string;
+   readonly theme: ThemeManager;
+   readonly openExternal: (url: string) => Promise<void>;
+@@ -592,6 +597,19 @@ export function registerDesktopIpc({
+       return state;
+     });
+   });
++  handleMainFrame(
++    desktopIpc.setInterfaceZoom,
++    (rawZoom) => {
++      if (!isInterfaceZoom(rawZoom)) throw new Error("Unsupported interface zoom");
++      return rawZoom;
++    },
++    (zoom, { window }) =>
++      windows.runUnscopedStateAction(window, async () => {
++        const state = await owners.settings.setInterfaceZoom(zoom);
++        windows.setInterfaceZoom(state.interfaceZoom);
++        return state;
++      }),
++  );
+ 
+   registerTerminalIpc(windows, capabilities);
+ 
+@@ -607,6 +625,22 @@ export function registerDesktopIpc({
+     windows.windowForSender(event.sender);
+     return capabilities.notificationPermission()?.openSystemSettings() ?? Promise.resolve();
+   });
++  handleMainFrame(
++    desktopIpc.getProxyStatus,
++    () => undefined,
++    () => capabilities.getProxyStatus(),
++  );
++  handleMainFrame(
++    desktopIpc.openProxySettings,
++    () => undefined,
++    async () => {
++      try {
++        return await capabilities.openProxySettings();
++      } catch {
++        return "Could not open Pi settings. Check that the settings file is available.";
++      }
++    },
++  );
+ 
+   ipcMain.handle(desktopIpc.createSession, (event, rawInput: unknown) =>
+     run(event, () => owners.conversation.createSession(expectCreateSessionInput(rawInput))),
+diff --git a/apps/desktop/electron/main.ts b/apps/desktop/electron/main.ts
+index 1955332..9734064 100644
+--- a/apps/desktop/electron/main.ts
++++ b/apps/desktop/electron/main.ts
+@@ -6,13 +6,11 @@ import {
+   Menu,
+   nativeImage,
+   nativeTheme,
+-  net,
+   protocol,
+   shell,
+   type MenuItemConstructorOptions,
+   type MessageBoxOptions,
+ } from "electron";
+-import { isValidHttpBaseUrl } from "@pi-gui/pi-sdk-driver";
+ import { createRequire } from "node:module";
+ import { randomUUID } from "node:crypto";
+ import type { AgentToolResult, ExtensionContext } from "@earendil-works/pi-coding-agent";
+@@ -21,6 +19,14 @@ import path from "node:path";
+ import { pathToFileURL } from "node:url";
+ import { augmentPosixPath } from "../scripts/augment-path.cjs";
+ import { DesktopAppStore } from "./application/app-store";
++import {
++  getDesktopProxySettingsPath,
++  getDesktopProxyStartupErrorMessage,
++  getDesktopProxyStatus,
++  initializeDesktopProxy,
++} from "./network/desktop-proxy";
++import personalBuild from "../personal-build.json";
++import { probeCustomProviderModels } from "./network/provider-model-probe";
+ import { WindowOwner } from "./windows/window-owner";
+ import { TurnCheckpointStore } from "./workbench/checkpoint-store";
+ import {
+@@ -51,7 +57,12 @@ import { checkForUpdate, initUpdateChecker, openReleasesPage } from "./platform/
+ import { ThemeManager } from "./platform/theme-manager";
+ import { windowBackgroundFor } from "../contracts/theme";
+ import { TerminalService } from "./platform/terminal-service";
+-import type { DesktopAppState, DesktopAppViewState } from "../contracts/desktop-state";
++import {
++  interfaceZoomLevels,
++  type DesktopAppState,
++  type DesktopAppViewState,
++  type InterfaceZoom,
++} from "../contracts/desktop-state";
+ import {
+   desktopCommands,
+   desktopIpc,
+@@ -60,8 +71,6 @@ import {
+   isCloseFocusedSurfaceShortcut,
+   getSidePanelTabCommand,
+   platformShortcutModifier,
+-  type CustomProviderProbeInput,
+-  type CustomProviderProbeResult,
+ } from "../contracts/ipc";
+ import {
+   assertComposerImageBytes,
+@@ -421,6 +430,7 @@ function createWindow(): BrowserWindow {
+       sandbox: true,
+       // Keep hidden test windows responsive so Playwright exercises the same UI flows.
+       backgroundThrottling: !backgroundTestMode,
++      zoomFactor: (store?.snapshot().interfaceZoom ?? 100) / 100,
+     },
+   });
+ 
+@@ -484,6 +494,21 @@ function createWindow(): BrowserWindow {
+     }
+ 
+     const lowerKey = input.key.toLowerCase();
++    const webContentsId = window.webContents.id;
++    const terminalFocused = terminalFocusedWebContentsIds.has(webContentsId);
++    const zoomModifier = process.platform === "darwin" ? input.meta : input.control;
++    if (
++      zoomModifier &&
++      !input.alt &&
++      (!input.shift || input.key === "+") &&
++      ["0", "-", "=", "+"].includes(input.key) &&
++      !terminalFocused
++    ) {
++      event.preventDefault();
++      if (input.key === "0") setInterfaceZoomFromMenu(100);
++      else stepInterfaceZoom(input.key === "-" ? -1 : 1);
++      return;
++    }
+     const platformModifier = platformShortcutModifier(process.platform, input);
+     const command = getDesktopCommandFromShortcut({
+       modifier: platformModifier,
+@@ -492,8 +517,6 @@ function createWindow(): BrowserWindow {
+       key: input.key,
+       code: input.code,
+     });
+-    const webContentsId = window.webContents.id;
+-    const terminalFocused = terminalFocusedWebContentsIds.has(webContentsId);
+     const closeFocusedSurface =
+       isCloseFocusedSurfaceShortcut({
+         meta: input.meta,
+@@ -732,6 +755,24 @@ async function runManualUpdateCheck(): Promise<void> {
+   }
+ }
+ 
++function setInterfaceZoomFromMenu(zoom: InterfaceZoom): void {
++  void store
++    .setInterfaceZoom(zoom)
++    .then((state) => {
++      windowOwner.setInterfaceZoom(state.interfaceZoom);
++    })
++    .catch((error: unknown) => console.error("[main] interface zoom menu failed", error));
++}
++
++function stepInterfaceZoom(direction: -1 | 1): void {
++  const current = store?.snapshot().interfaceZoom ?? 100;
++  const index = interfaceZoomLevels.indexOf(current);
++  const next =
++    interfaceZoomLevels[Math.max(0, Math.min(interfaceZoomLevels.length - 1, index + direction))] ??
++    100;
++  setInterfaceZoomFromMenu(next);
++}
++
+ function installApplicationMenu(): void {
+   if (process.platform !== "darwin") {
+     return;
+@@ -812,9 +853,21 @@ function installApplicationMenu(): void {
+         },
+         { role: "toggleDevTools" },
+         { type: "separator" },
+-        { role: "resetZoom" },
+-        { role: "zoomIn" },
+-        { role: "zoomOut" },
++        {
++          label: "Reset Interface Zoom",
++          accelerator: "CommandOrControl+0",
++          click: () => setInterfaceZoomFromMenu(100),
++        },
++        {
++          label: "Zoom In",
++          accelerator: "CommandOrControl+=",
++          click: () => stepInterfaceZoom(1),
++        },
++        {
++          label: "Zoom Out",
++          accelerator: "CommandOrControl+-",
++          click: () => stepInterfaceZoom(-1),
++        },
+         { type: "separator" },
+         { role: "togglefullscreen" },
+       ],
+@@ -864,6 +917,28 @@ app
+       return;
+     }
+ 
++    // Configure both fetch and WebSocket before any provider runtime is created.
++    try {
++      await initializeDesktopProxy();
++    } catch (error) {
++      const settingsPath = getDesktopProxySettingsPath();
++      const result = await dialog.showMessageBox({
++        type: "error",
++        title: "Unable to initialize the proxy",
++        message: getDesktopProxyStartupErrorMessage(error),
++        detail: "Correct the configuration, then start pi-gui again.",
++        buttons: settingsPath ? ["Open Pi settings", "Exit"] : ["Exit"],
++        defaultId: 0,
++        cancelId: settingsPath ? 1 : 0,
++      });
++      if (settingsPath && result.response === 0) {
++        const openError = await openProxySettings();
++        if (openError) dialog.showErrorBox("Unable to open Pi settings", openError);
++      }
++      app.exit(1);
++      return;
++    }
++
+     // On macOS, packaged builds already render the dock icon from `icon.icns`
+     // in the app bundle. In dev we override the generic Electron dock icon with
+     // the real PNG so the running app looks right end-to-end.
+@@ -1086,6 +1161,12 @@ app
+         pickWorkspace: (window) => pickWorkspaceViaDialog(window),
+         createLoginCallbacks: (window) => createRuntimeLoginCallbacks(window),
+         probeCustomProviderModels,
++        getProxyStatus: async () => ({
++          ...getDesktopProxyStatus(),
++          version: app.getVersion(),
++          buildLabel: personalBuild.label,
++        }),
++        openProxySettings,
+         notificationPermission: () => notificationPermissionService,
+         terminal: getTerminalService,
+         optionalTerminal: () => terminalService,
+@@ -1509,53 +1590,15 @@ function escapeHtml(value: string): string {
+     .replace(/'/g, "&#39;");
+ }
+ 
+-async function probeCustomProviderModels(
+-  input: CustomProviderProbeInput,
+-): Promise<CustomProviderProbeResult> {
+-  const baseUrl = input.baseUrl?.trim();
+-  if (!baseUrl || !isValidHttpBaseUrl(baseUrl)) {
+-    return { ok: false, error: "Base URL must start with http:// or https://" };
+-  }
+-  const target = `${baseUrl.replace(/\/+$/, "")}/models`;
+-  const apiKey = input.apiKey?.trim();
++async function openProxySettings(): Promise<string | undefined> {
++  const settingsPath = getDesktopProxySettingsPath();
++  if (!settingsPath) return "Pi settings are not available yet. Restart pi-gui and try again.";
+   try {
+-    const response = await net.fetch(target, {
+-      method: "GET",
+-      headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : undefined,
+-      signal: AbortSignal.timeout(5000),
+-    });
+-    if (!response.ok) {
+-      return { ok: false, error: `${response.status} ${response.statusText} from ${target}` };
+-    }
+-    const payload = (await response.json()) as unknown;
+-    const data = (payload as { data?: unknown }).data;
+-    if (!Array.isArray(data)) {
+-      return { ok: false, error: `Response from ${target} is missing a "data" array` };
+-    }
+-    const models = data
+-      .map((entry) => {
+-        if (
+-          entry &&
+-          typeof entry === "object" &&
+-          typeof (entry as { id?: unknown }).id === "string"
+-        ) {
+-          return (entry as { id: string }).id;
+-        }
+-        return undefined;
+-      })
+-      .filter((id): id is string => Boolean(id && id.length > 0));
+-    return { ok: true, models };
+-  } catch (error) {
+-    return { ok: false, error: describeProbeError(error, target) };
+-  }
+-}
+-
+-function describeProbeError(error: unknown, target: string): string {
+-  if (error instanceof Error && error.name === "TimeoutError") {
+-    return `Timed out after 5s contacting ${target}`;
+-  }
+-  if (error instanceof Error) {
+-    return error.message;
++    const result = await shell.openPath(settingsPath);
++    return result
++      ? "Could not open Pi settings. Check that settings.json exists and that your account can open it."
++      : undefined;
++  } catch {
++    return "Could not open Pi settings. Check that settings.json exists and that your account can open it.";
+   }
+-  return String(error);
+ }
+diff --git a/apps/desktop/electron/network/desktop-proxy.ts b/apps/desktop/electron/network/desktop-proxy.ts
+new file mode 100644
+index 0000000..dad5ed5
+--- /dev/null
++++ b/apps/desktop/electron/network/desktop-proxy.ts
+@@ -0,0 +1,217 @@
++import { readFile } from "node:fs/promises";
++import { join } from "node:path";
++import { EnvHttpProxyAgent, install, setGlobalDispatcher } from "undici";
++import type { ProxyStatusSnapshot } from "../../contracts/proxy-status";
++
++export interface DesktopProxyOptions {
++  readonly httpProxy: string;
++  readonly httpsProxy: string;
++  readonly noProxy: string;
++}
++
++export interface InitializeDesktopProxyOptions {
++  readonly agentDir?: string;
++  readonly env?: NodeJS.ProcessEnv;
++}
++
++const INVALID_EXPLICIT_PROXY =
++  "Invalid httpProxy in Pi settings: expected a valid http:// or https:// proxy URL.";
++const SETTINGS_READ_ERROR = "Unable to read Pi proxy settings.";
++const SETTINGS_PARSE_ERROR = "Pi proxy settings contain invalid JSON.";
++
++type ProxyConfigErrorKind = "explicit" | "http-env" | "https-env" | "parse" | "read" | "dispatcher";
++class DesktopProxyConfigError extends Error {
++  constructor(readonly kind: ProxyConfigErrorKind) {
++    super(
++      kind === "explicit"
++        ? INVALID_EXPLICIT_PROXY
++        : kind === "http-env"
++          ? "Invalid HTTP_PROXY environment value: expected a valid http:// or https:// proxy URL."
++          : kind === "https-env"
++            ? "Invalid HTTPS_PROXY environment value: expected a valid http:// or https:// proxy URL."
++            : kind === "parse"
++              ? SETTINGS_PARSE_ERROR
++              : kind === "read"
++                ? SETTINGS_READ_ERROR
++                : "Unable to initialize the configured proxy. Check Pi settings and proxy environment configuration.",
++    );
++    this.name = "DesktopProxyConfigError";
++  }
++}
++let effectiveStatus: ProxyStatusSnapshot | undefined;
++let configuredSettingsPath: string | undefined;
++
++export function getDesktopProxySettingsPath(): string | undefined {
++  return configuredSettingsPath;
++}
++
++export function getDesktopProxyStartupErrorMessage(error: unknown): string {
++  return error instanceof DesktopProxyConfigError
++    ? error.message
++    : "Unable to initialize proxy settings. Check Pi settings and proxy environment variables.";
++}
++
++function safeOrigin(value: string): string | null {
++  if (!value) return null;
++  try {
++    return new URL(value).origin;
++  } catch {
++    return null;
++  }
++}
++
++export function getDesktopProxyStatus(): ProxyStatusSnapshot {
++  if (!effectiveStatus) {
++    throw new Error("Desktop proxy status is unavailable before initialization completes.");
++  }
++  return effectiveStatus;
++}
++
++function getEnvironmentValue(env: NodeJS.ProcessEnv, name: string): string | undefined {
++  // Windows environment names are case-insensitive in practice. Prefer the
++  // conventional upper-case spelling when both spellings are present.
++  const upper = env[name.toUpperCase()];
++  const lower = env[name.toLowerCase()];
++  const value = upper ?? lower;
++  return typeof value === "string" ? value.trim() || undefined : undefined;
++}
++
++function validateProxyUrl(value: string, kind: ProxyConfigErrorKind): string {
++  let parsed: URL;
++  try {
++    parsed = new URL(value);
++  } catch {
++    throw new DesktopProxyConfigError(kind);
++  }
++  if ((parsed.protocol !== "http:" && parsed.protocol !== "https:") || !parsed.hostname) {
++    throw new DesktopProxyConfigError(kind);
++  }
++  return value;
++}
++
++function validateEnvironmentProxy(
++  value: string | undefined,
++  kind: "http-env" | "https-env",
++): string {
++  if (!value) return "";
++  return validateProxyUrl(value, kind);
++}
++
++/**
++ * Resolve the Pi setting and environment proxy variables without mutating
++ * process.env. Empty strings are intentional: they prevent Undici from
++ * falling back to ambient environment values after this snapshot is taken.
++ */
++export function resolveDesktopProxyOptions(
++  settings: unknown,
++  env: NodeJS.ProcessEnv,
++): DesktopProxyOptions {
++  const noProxy = getEnvironmentValue(env, "NO_PROXY") ?? "";
++
++  let explicitProxy: string | undefined;
++  if (settings !== null && typeof settings === "object" && !Array.isArray(settings)) {
++    const setting = (settings as Record<string, unknown>).httpProxy;
++    if (setting !== undefined) {
++      if (typeof setting !== "string") {
++        throw new DesktopProxyConfigError("explicit");
++      }
++      const trimmed = setting.trim();
++      if (trimmed) {
++        explicitProxy = validateProxyUrl(trimmed, "explicit");
++      }
++    }
++  }
++
++  if (explicitProxy) {
++    return {
++      httpProxy: explicitProxy,
++      httpsProxy: explicitProxy,
++      noProxy,
++    };
++  }
++
++  const httpEnvironmentProxy = validateEnvironmentProxy(
++    getEnvironmentValue(env, "HTTP_PROXY"),
++    "http-env",
++  );
++  const httpsEnvironmentProxy = validateEnvironmentProxy(
++    getEnvironmentValue(env, "HTTPS_PROXY"),
++    "https-env",
++  );
++  return {
++    httpProxy: httpEnvironmentProxy,
++    // Undici falls back to httpProxy for HTTPS when httpsProxy is empty, which
++    // matches the documented HTTP_PROXY-only behavior.
++    httpsProxy: httpsEnvironmentProxy,
++    noProxy,
++  };
++}
++
++export function createDesktopProxyDispatcher(
++  settings: unknown,
++  env: NodeJS.ProcessEnv,
++): EnvHttpProxyAgent {
++  const options = resolveDesktopProxyOptions(settings, env);
++  try {
++    return new EnvHttpProxyAgent({
++      ...options,
++      // Keep HTTP origins on CONNECT tunnels, matching Pi's own configured
++      // dispatcher and avoiding the forward-proxy path for successive requests.
++      proxyTunnel: true,
++    });
++  } catch {
++    // Constructor diagnostics may echo a proxy URI, including credentials.
++    throw new DesktopProxyConfigError("dispatcher");
++  }
++}
++
++async function readGlobalSettings(agentDir: string): Promise<unknown> {
++  let content: string;
++  try {
++    content = await readFile(join(agentDir, "settings.json"), "utf8");
++  } catch (error) {
++    if (error !== null && typeof error === "object" && "code" in error && error.code === "ENOENT") {
++      return {};
++    }
++    throw new DesktopProxyConfigError("read");
++  }
++
++  try {
++    return JSON.parse(content) as unknown;
++  } catch {
++    throw new DesktopProxyConfigError("parse");
++  }
++}
++
++/** Read Pi's global settings and install the proxy for Undici fetch and WebSocket. */
++export async function initializeDesktopProxy(
++  options: InitializeDesktopProxyOptions = {},
++): Promise<EnvHttpProxyAgent> {
++  const agentDir =
++    options.agentDir ?? (await import("@earendil-works/pi-coding-agent")).getAgentDir();
++  configuredSettingsPath = join(agentDir, "settings.json");
++  const settings = await readGlobalSettings(agentDir);
++  const env = options.env ?? process.env;
++  const resolved = resolveDesktopProxyOptions(settings, env);
++  const explicit =
++    settings !== null &&
++    typeof settings === "object" &&
++    !Array.isArray(settings) &&
++    typeof (settings as Record<string, unknown>).httpProxy === "string" &&
++    Boolean(((settings as Record<string, unknown>).httpProxy as string).trim());
++  const environment = Boolean(
++    getEnvironmentValue(env, "HTTP_PROXY") || getEnvironmentValue(env, "HTTPS_PROXY"),
++  );
++  const status: ProxyStatusSnapshot = {
++    source: explicit ? "pi-settings" : environment ? "environment" : "direct",
++    httpProxy: safeOrigin(resolved.httpProxy),
++    httpsProxy: safeOrigin(resolved.httpsProxy || resolved.httpProxy),
++    noProxy: resolved.noProxy,
++    settingsPath: configuredSettingsPath,
++  };
++  const dispatcher = createDesktopProxyDispatcher(settings, env);
++  setGlobalDispatcher(dispatcher);
++  install();
++  effectiveStatus = status;
++  return dispatcher;
++}
+diff --git a/apps/desktop/electron/network/provider-model-probe.ts b/apps/desktop/electron/network/provider-model-probe.ts
+new file mode 100644
+index 0000000..7811449
+--- /dev/null
++++ b/apps/desktop/electron/network/provider-model-probe.ts
+@@ -0,0 +1,138 @@
++import { isValidHttpBaseUrl } from "@pi-gui/pi-sdk-driver";
++import type { CustomProviderProbeInput, CustomProviderProbeResult } from "../../contracts/ipc";
++
++/** Fetch the model list for a custom provider through the configured Node fetch. */
++export async function probeCustomProviderModels(
++  input: CustomProviderProbeInput,
++  fetchImpl: typeof globalThis.fetch = globalThis.fetch,
++): Promise<CustomProviderProbeResult> {
++  const baseUrl = input.baseUrl?.trim();
++  if (!baseUrl || !isValidHttpBaseUrl(baseUrl)) {
++    return { ok: false, error: "Base URL must start with http:// or https://" };
++  }
++
++  const requestTarget = `${baseUrl.replace(/\/+$/, "")}/models`;
++  const displayTarget = redactUrlCredentials(requestTarget);
++  const apiKey = input.apiKey?.trim();
++
++  try {
++    const response = await fetchImpl(requestTarget, {
++      method: "GET",
++      headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : undefined,
++      signal: AbortSignal.timeout(5000),
++    });
++    if (!response.ok) {
++      return {
++        ok: false,
++        error: describeHttpStatus(response.status, displayTarget),
++      };
++    }
++
++    const payload = (await response.json()) as unknown;
++    const data = (payload as { data?: unknown }).data;
++    if (!Array.isArray(data)) {
++      return {
++        ok: false,
++        error: `Response from ${displayTarget} is missing a "data" array`,
++      };
++    }
++
++    const models = data
++      .map((entry) => {
++        if (
++          entry &&
++          typeof entry === "object" &&
++          typeof (entry as { id?: unknown }).id === "string"
++        ) {
++          return (entry as { id: string }).id;
++        }
++        return undefined;
++      })
++      .filter((id): id is string => Boolean(id && id.length > 0));
++    return { ok: true, models };
++  } catch (error) {
++    return { ok: false, error: describeProbeError(error, displayTarget) };
++  }
++}
++
++function redactUrlCredentials(target: string): string {
++  try {
++    const url = new URL(target);
++    url.username = "";
++    url.password = "";
++    url.search = "";
++    url.hash = "";
++    return url.toString();
++  } catch {
++    return "the configured provider URL";
++  }
++}
++
++function describeProbeError(error: unknown, target: string): string {
++  if (error instanceof Error && error.name === "TimeoutError") {
++    return `Timed out after 5s contacting ${target}`;
++  }
++
++  const code = getSafeNetworkErrorCode(error);
++  if (code === "ETIMEDOUT" || code === "ESOCKETTIMEDOUT" || code === "UND_ERR_CONNECT_TIMEOUT") {
++    return `Timed out contacting ${target}. Check the provider or proxy network and try again.`;
++  }
++  if (code === "ECONNREFUSED") {
++    return `Could not connect to ${target}. Check the provider or proxy address and try again.`;
++  }
++  if (code === "ENOTFOUND" || code === "EAI_AGAIN") {
++    return `Could not resolve the provider host for ${target}. Check the network or proxy settings and try again.`;
++  }
++  if (
++    code === "CERT_HAS_EXPIRED" ||
++    code === "UNABLE_TO_VERIFY_LEAF_SIGNATURE" ||
++    code === "ERR_TLS_CERT_ALTNAME_INVALID" ||
++    code === "DEPTH_ZERO_SELF_SIGNED_CERT"
++  ) {
++    return `Could not verify the TLS certificate for ${target}. Check the provider or proxy certificate settings.`;
++  }
++  return `Could not reach ${target}. Check the provider URL, network, or proxy settings and try again.`;
++}
++
++function describeHttpStatus(status: number, target: string): string {
++  if (status === 401 || status === 403)
++    return `${status} Authentication or permission failed at ${target}. Check the API key and provider access.`;
++  if (status === 407)
++    return `407 Proxy authentication required for ${target}. Check proxy credentials in your proxy configuration.`;
++  if (status === 429) return `429 Provider rate limit reached at ${target}. Wait and try again.`;
++  if (status >= 500) return `${status} Provider service error at ${target}. Try again later.`;
++  return `${status} Provider request failed at ${target}. Check the provider URL and settings.`;
++}
++
++function getSafeNetworkErrorCode(error: unknown): string | undefined {
++  if (!error || typeof error !== "object") {
++    return undefined;
++  }
++
++  const directCode = (error as { code?: unknown }).code;
++  if (typeof directCode === "string" && SAFE_NETWORK_ERROR_CODES.has(directCode)) {
++    return directCode;
++  }
++
++  const cause = (error as { cause?: unknown }).cause;
++  if (!cause || typeof cause !== "object") {
++    return undefined;
++  }
++  const causeCode = (cause as { code?: unknown }).code;
++  return typeof causeCode === "string" && SAFE_NETWORK_ERROR_CODES.has(causeCode)
++    ? causeCode
++    : undefined;
++}
++
++const SAFE_NETWORK_ERROR_CODES = new Set([
++  "ECONNREFUSED",
++  "ENOTFOUND",
++  "EAI_AGAIN",
++  "CERT_HAS_EXPIRED",
++  "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
++  "ERR_TLS_CERT_ALTNAME_INVALID",
++  "DEPTH_ZERO_SELF_SIGNED_CERT",
++  "ETIMEDOUT",
++  "ESOCKETTIMEDOUT",
++  "UND_ERR_CONNECT_TIMEOUT",
++]);
+diff --git a/apps/desktop/electron/persistence/app-store-persistence.ts b/apps/desktop/electron/persistence/app-store-persistence.ts
+index fbc4b9a..ea8f82b 100644
+--- a/apps/desktop/electron/persistence/app-store-persistence.ts
++++ b/apps/desktop/electron/persistence/app-store-persistence.ts
+@@ -10,8 +10,14 @@ import type {
+   ThemeMode,
+   ThemePresetId,
+   ThreadGrouping,
++  InterfaceZoom,
++} from "../../contracts/desktop-state";
++import {
++  isInterfaceZoom,
++  isThemeMode,
++  isThemePresetId,
++  isThreadGrouping,
+ } from "../../contracts/desktop-state";
+-import { isThemeMode, isThemePresetId, isThreadGrouping } from "../../contracts/desktop-state";
+ import type { ModelSettingsSnapshot } from "@pi-gui/session-driver/runtime-types";
+ import { readJsonWithBackup, writeFileAtomicQueued } from "./atomic-file-write";
+ import { decodeAttachments } from "./attachment-store";
+@@ -155,6 +161,51 @@ export async function writePersistedUiState(
+   });
+ }
+ 
++export async function readPersistedInterfaceZoom(filePath: string): Promise<InterfaceZoom> {
++  const result = await readJsonWithBackup(filePath);
++  if (result.value === undefined) {
++    if (result.corrupted) {
++      console.warn(`[app-store] corrupt interface zoom at ${filePath}; using 100%`);
++    }
++    return 100;
++  }
++  try {
++    const zoom = decodePersistedInterfaceZoom(result.value);
++    if (result.corrupted) {
++      console.warn(`[app-store] corrupt interface zoom at ${filePath}; recovered from backup`);
++    }
++    return zoom;
++  } catch {
++    console.warn(`[app-store] invalid interface zoom at ${filePath}; using 100%`);
++    return 100;
++  }
++}
++
++export function decodePersistedInterfaceZoom(value: unknown): InterfaceZoom {
++  if (
++    typeof value !== "object" ||
++    value === null ||
++    !isInterfaceZoom((value as Record<string, unknown>).interfaceZoom)
++  ) {
++    throw new Error("Invalid persisted interface zoom");
++  }
++  return (value as Record<string, unknown>).interfaceZoom as InterfaceZoom;
++}
++
++export async function writePersistedInterfaceZoom(
++  filePath: string,
++  interfaceZoom: InterfaceZoom,
++): Promise<void> {
++  if (!isInterfaceZoom(interfaceZoom)) {
++    throw new Error(`Unsupported interface zoom: ${String(interfaceZoom)}`);
++  }
++  await writeFileAtomicQueued(
++    filePath,
++    `${JSON.stringify({ interfaceZoom }, null, 2)}\n`,
++    decodePersistedInterfaceZoom,
++  );
++}
++
+ /** Layouts are per-task conveniences: one bad layout must not block the rest of saved UI state. */
+ function decodeWorkbenchTemplates(value: unknown): Record<string, TaskWorkbenchTemplate> {
+   const records = objectRecord(value);
+diff --git a/apps/desktop/electron/platform/files/git-review.ts b/apps/desktop/electron/platform/files/git-review.ts
+index a837b7d..04257b6 100644
+--- a/apps/desktop/electron/platform/files/git-review.ts
++++ b/apps/desktop/electron/platform/files/git-review.ts
+@@ -12,7 +12,7 @@ import {
+   symlink,
+   writeFile,
+ } from "node:fs/promises";
+-import { devNull, tmpdir } from "node:os";
++import { tmpdir } from "node:os";
+ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+ import type {
+   ChangeReviewFileStageResult,
+@@ -36,6 +36,9 @@ const PREPARATION_MS = 10_000;
+ /** Pathspec bytes per Git call, well below Windows' 32K command-line limit. */
+ const MAX_PATHSPEC_BYTES = 24_000;
+ const COMPLETE: ReviewCoverage = { state: "complete", notes: [] };
++// Git accepts this cross-platform sentinel for `diff --no-index`; Node's Windows
++// `os.devNull` value (`\\.\nul`) is not a path Git can open in this invocation.
++const GIT_NULL_DEVICE = "/dev/null";
+ 
+ export interface GitReviewLimits {
+   /** Output cap for one Git listing; larger output makes the review unavailable. */
+@@ -963,7 +966,7 @@ async function readPatch(
+   const scratch = await mkdtemp(join(tmpdir(), "pi-gui-review-"));
+   try {
+     const materialize = async (side: string, name: string, file: WorkingFile) => {
+-      if (file.mode === "missing") return devNull;
++      if (file.mode === "missing") return GIT_NULL_DEVICE;
+       const relative = `${side}/${name}`;
+       const target = safePath(scratch, relative);
+       await mkdir(dirname(target), { recursive: true });
+@@ -982,6 +985,14 @@ async function readPatch(
+       MAX_PATCH_BYTES,
+     );
+     const patch = result.stdout.toString("utf8");
++    // `diff --no-index` uses exit code 1 for a valid difference, but a failed
++    // null-device open can also return 1 with empty stdout. Do not report that
++    // as an available empty patch.
++    if (
++      !result.truncated &&
++      ((result.code !== 0 && result.code !== 1) || (result.code === 1 && patch.length === 0))
++    )
++      throw new Error("Git could not generate the review patch.");
+     const notes: string[] = [];
+     if (result.truncated) notes.push("Patch is truncated at the 1 MiB review limit.");
+     if (
+diff --git a/apps/desktop/electron/preload.ts b/apps/desktop/electron/preload.ts
+index b6d1fb4..2fcd49e 100644
+--- a/apps/desktop/electron/preload.ts
++++ b/apps/desktop/electron/preload.ts
+@@ -25,6 +25,7 @@ import {
+   type TerminalPanelSnapshot,
+   type TerminalSize,
+ } from "../contracts/ipc";
++import type { DesktopProxyStatus } from "../contracts/proxy-status";
+ import type { ClipboardImageRead } from "../contracts/composer-attachments";
+ import type { SaveTaskWorkbenchTemplateInput, TaskWorkbenchTemplate } from "../contracts/workbench";
+ import type {
+@@ -379,6 +380,8 @@ contextBridge.exposeInMainWorld("piApp", {
+     ) as Promise<DesktopAppState>,
+   setEnableTransparency: (enabled: boolean) =>
+     ipcRenderer.invoke(desktopIpc.setEnableTransparency, enabled) as Promise<DesktopAppState>,
++  setInterfaceZoom: (zoom: 90 | 100 | 110 | 125 | 150) =>
++    ipcRenderer.invoke(desktopIpc.setInterfaceZoom, zoom) as Promise<DesktopAppState>,
+   setThemePresetId: (presetId: ThemePresetId) =>
+     ipcRenderer.invoke(desktopIpc.setThemePresetId, presetId) as Promise<DesktopAppState>,
+   ensureTerminalPanel: (
+@@ -451,6 +454,10 @@ contextBridge.exposeInMainWorld("piApp", {
+     ) as Promise<DesktopNotificationPermissionStatus>,
+   openSystemNotificationSettings: () =>
+     ipcRenderer.invoke(desktopIpc.openSystemNotificationSettings) as Promise<void>,
++  getProxyStatus: () =>
++    ipcRenderer.invoke(desktopIpc.getProxyStatus) as Promise<DesktopProxyStatus>,
++  openProxySettings: () =>
++    ipcRenderer.invoke(desktopIpc.openProxySettings) as Promise<string | undefined>,
+   onNotificationPermissionStatusChanged: (
+     callback: (status: DesktopNotificationPermissionStatus) => void,
+   ) => {
+diff --git a/apps/desktop/electron/windows/window-owner.ts b/apps/desktop/electron/windows/window-owner.ts
+index b1defbb..54aae22 100644
+--- a/apps/desktop/electron/windows/window-owner.ts
++++ b/apps/desktop/electron/windows/window-owner.ts
+@@ -5,6 +5,7 @@ import type {
+   DesktopAppState,
+   DesktopAppViewState,
+   SelectedTranscriptRecord,
++  InterfaceZoom,
+ } from "../../contracts/desktop-state";
+ import { desktopIpc } from "../../contracts/ipc";
+ import { SerializedActionQueue } from "./action-queue";
+@@ -118,6 +119,15 @@ export class WindowOwner {
+     return [...this.windows];
+   }
+ 
++  setInterfaceZoom(zoom: InterfaceZoom): void {
++    const factor = zoom / 100;
++    for (const window of this.windows) {
++      if (canPublishToWindow(window) && window.webContents.getZoomFactor() !== factor) {
++        window.webContents.setZoomFactor(factor);
++      }
++    }
++  }
++
+   size(): number {
+     return this.windows.size;
+   }
+diff --git a/apps/desktop/personal-build.json b/apps/desktop/personal-build.json
+new file mode 100644
+index 0000000..cb9e58c
+--- /dev/null
++++ b/apps/desktop/personal-build.json
+@@ -0,0 +1,3 @@
++{
++  "label": "proxy.4"
++}
+diff --git a/apps/desktop/scripts/fixtures/personal-build-valid/manifest.json b/apps/desktop/scripts/fixtures/personal-build-valid/manifest.json
+new file mode 100644
+index 0000000..78b2331
+--- /dev/null
++++ b/apps/desktop/scripts/fixtures/personal-build-valid/manifest.json
+@@ -0,0 +1,8 @@
++{
++  "id": "9.9.9-proxy.9",
++  "appVersion": "9.9.9",
++  "buildLabel": "synthetic",
++  "bundleHash": "7c6fb4e113662ca5d6242aa95a754d2fae341cb1f2c26703fd060f3ca8a333fc",
++  "baselineCommit": "fixture",
++  "source": "checked-in synthetic fixture"
++}
+diff --git a/apps/desktop/scripts/fixtures/personal-build-valid/pi-gui.exe b/apps/desktop/scripts/fixtures/personal-build-valid/pi-gui.exe
+new file mode 100644
+index 0000000..eeda270
+--- /dev/null
++++ b/apps/desktop/scripts/fixtures/personal-build-valid/pi-gui.exe
+@@ -0,0 +1 @@
++synthetic personal build fixture; not executable
+diff --git a/apps/desktop/scripts/fixtures/personal-build-valid/resources/app.asar b/apps/desktop/scripts/fixtures/personal-build-valid/resources/app.asar
+new file mode 100644
+index 0000000..6672550
+--- /dev/null
++++ b/apps/desktop/scripts/fixtures/personal-build-valid/resources/app.asar
+@@ -0,0 +1 @@
++synthetic app archive for deployment validation
+diff --git a/apps/desktop/scripts/personal-deploy.ps1 b/apps/desktop/scripts/personal-deploy.ps1
+new file mode 100644
+index 0000000..815d295
+--- /dev/null
++++ b/apps/desktop/scripts/personal-deploy.ps1
+@@ -0,0 +1,220 @@
++[CmdletBinding()]
++param(
++  [Parameter(Mandatory = $true)]
++  [ValidateSet('Bootstrap', 'List', 'Install', 'Activate', 'Rollback', 'Launch')]
++  [string]$Mode,
++  [string]$Id,
++  [string]$BundlePath,
++  [string]$Root = 'F:\Apps\pi-gui-proxy'
++)
++
++$ErrorActionPreference = 'Stop'
++Set-StrictMode -Version Latest
++
++function Assert-Id([string]$Value) {
++  if ($Value -cnotmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?-proxy\.\d+$') {
++    throw "Invalid personal build id: $Value"
++  }
++}
++
++function Get-InstallRoot {
++  return [System.IO.Path]::GetFullPath($Root).TrimEnd('\')
++}
++
++function Get-VersionPath([string]$Value) {
++  Assert-Id $Value
++  $rootPath = Get-InstallRoot
++  $versions = [System.IO.Path]::GetFullPath((Join-Path $rootPath 'versions')).TrimEnd('\')
++  $path = [System.IO.Path]::GetFullPath((Join-Path $versions $Value))
++  if (-not $path.StartsWith($versions + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
++    throw "Version path escaped versions directory: $Value"
++  }
++  return $path
++}
++
++function Get-ValidatedVersion([string]$Value) {
++  $path = Get-VersionPath $Value
++  $manifestPath = Join-Path $path 'manifest.json'
++  $exe = Join-Path $path 'pi-gui.exe'
++  if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf) -or
++      -not (Test-Path -LiteralPath $exe -PathType Leaf)) {
++    throw "Incomplete installed personal build: $Value"
++  }
++  $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
++  if ($manifest.id -cne $Value -or [string]::IsNullOrWhiteSpace([string]$manifest.bundleHash)) {
++    throw "Manifest does not validate personal build: $Value"
++  }
++  $asar = Join-Path $path 'resources/app.asar'
++  if (-not (Test-Path -LiteralPath $asar -PathType Leaf)) { throw "Missing packaged app archive: $Value" }
++  $actualHash = (Get-FileHash -LiteralPath $asar -Algorithm SHA256).Hash.ToLowerInvariant()
++  if ($actualHash -cne ([string]$manifest.bundleHash).ToLowerInvariant()) { throw "Bundle hash mismatch: $Value" }
++  return [pscustomobject]@{ Id = $Value; Path = $path; Manifest = $manifest }
++}
++
++function Get-State {
++  $statePath = Join-Path (Get-InstallRoot) 'state.json'
++  if (-not (Test-Path -LiteralPath $statePath -PathType Leaf)) {
++    return [pscustomobject]@{ current = $null; previous = $null }
++  }
++  $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
++  foreach ($key in @('current', 'previous')) {
++    $value = [string]$state.$key
++    if ($value) { Assert-Id $value }
++  }
++  return $state
++}
++
++function Write-State($State) {
++  $rootPath = Get-InstallRoot
++  New-Item -ItemType Directory -Path $rootPath -Force | Out-Null
++  $target = Join-Path $rootPath 'state.json'
++  $temporary = Join-Path $rootPath ('.state-' + [guid]::NewGuid().ToString('N') + '.tmp')
++  $json = $State | ConvertTo-Json -Compress
++  [System.IO.File]::WriteAllText($temporary, $json + "`n", [System.Text.UTF8Encoding]::new($false))
++  if (-not ('PiGuiPersonalDeploy.NativeMove' -as [type])) {
++      Add-Type -TypeDefinition @'
++using System;
++using System.ComponentModel;
++using System.Runtime.InteropServices;
++namespace PiGuiPersonalDeploy {
++  public static class NativeMove {
++    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
++    private static extern bool MoveFileEx(string existing, string replacement, int flags);
++    public static void Replace(string source, string destination) {
++      if (!MoveFileEx(source, destination, 0x1 | 0x8)) {
++        throw new Win32Exception(Marshal.GetLastWin32Error());
++      }
++    }
++  }
++}
++'@
++  }
++  # Keep a failed temporary state file for diagnosis. The current state remains
++  # untouched unless this same-volume atomic replace succeeds.
++  [PiGuiPersonalDeploy.NativeMove]::Replace($temporary, $target)
++}
++
++function Assert-BundleDirectory([string]$Path, [string]$ExpectedId) {
++  $manifestPath = Join-Path $Path 'manifest.json'
++  $exe = Join-Path $Path 'pi-gui.exe'
++  $asar = Join-Path $Path 'resources/app.asar'
++  foreach ($required in @($manifestPath, $exe, $asar)) {
++    if (-not (Test-Path -LiteralPath $required -PathType Leaf)) { throw "Incomplete bundle: missing $required" }
++  }
++  $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
++  if ($manifest.id -cne $ExpectedId -or [string]::IsNullOrWhiteSpace([string]$manifest.bundleHash)) {
++    throw "Bundle manifest does not validate personal build: $ExpectedId"
++  }
++  $actualHash = (Get-FileHash -LiteralPath $asar -Algorithm SHA256).Hash.ToLowerInvariant()
++  if ($actualHash -cne ([string]$manifest.bundleHash).ToLowerInvariant()) { throw "Bundle hash mismatch: $ExpectedId" }
++  return $manifest
++}
++
++function Set-Active([string]$Value) {
++  $null = Get-ValidatedVersion $Value
++  $state = Get-State
++  if ($state.current -ceq $Value) {
++    Write-Host "Already active for next launch: $Value"
++    return
++  }
++  $next = [pscustomobject]@{ current = $Value; previous = [string]$state.current }
++  Write-State $next
++  Write-Host "Selected for next full launch: $Value"
++}
++
++switch ($Mode) {
++  'Bootstrap' {
++    $rootPath = Get-InstallRoot
++    $scriptsPath = Join-Path $rootPath 'scripts'
++    $targetScript = Join-Path $scriptsPath 'personal-deploy.ps1'
++    $targetLauncher = Join-Path $rootPath 'pi-gui-proxy.cmd'
++    $targetShortcut = Join-Path $rootPath 'Start pi-gui proxy.lnk'
++    if ((Test-Path -LiteralPath $targetScript) -or (Test-Path -LiteralPath $targetLauncher) -or (Test-Path -LiteralPath $targetShortcut)) {
++      throw 'Launcher or deployment script already exists; refusing overwrite'
++    }
++    New-Item -ItemType Directory -Path $scriptsPath -Force | Out-Null
++    Copy-Item -LiteralPath $PSCommandPath -Destination $targetScript
++    $launcher = "@echo off`r`nsetlocal`r`npowershell.exe -NoLogo -NoProfile -ExecutionPolicy RemoteSigned -File `"%~dp0scripts\personal-deploy.ps1`" -Mode Launch -Root `"%~dp0.`"`r`n"
++    [System.IO.File]::WriteAllText($targetLauncher, $launcher, [System.Text.Encoding]::ASCII)
++    $shell = New-Object -ComObject WScript.Shell
++    $shortcut = $shell.CreateShortcut($targetShortcut)
++    $shortcut.TargetPath = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
++    $shortcut.Arguments = "-NoProfile -ExecutionPolicy RemoteSigned -WindowStyle Hidden -File `"$targetScript`" -Mode Launch -Root `"$rootPath`""
++    $shortcut.WorkingDirectory = $rootPath
++    $shortcut.Description = 'Start pi-gui using the selected personal build'
++    $shortcut.Save()
++    [void][Runtime.InteropServices.Marshal]::ReleaseComObject($shortcut)
++    [void][Runtime.InteropServices.Marshal]::ReleaseComObject($shell)
++    Write-Host "Installed fixed launcher: $targetLauncher"
++  }
++  'List' {
++    $versionsRoot = Join-Path (Get-InstallRoot) 'versions'
++    $state = Get-State
++    if (Test-Path -LiteralPath $versionsRoot -PathType Container) {
++      Get-ChildItem -LiteralPath $versionsRoot -Directory | Sort-Object Name | ForEach-Object {
++        try {
++          $version = Get-ValidatedVersion $_.Name
++          [pscustomobject]@{ Id = $version.Id; Active = ($state.current -ceq $version.Id); Previous = ($state.previous -ceq $version.Id); Label = $version.Manifest.buildLabel }
++        } catch {
++          [pscustomobject]@{ Id = $_.Name; Active = $false; Previous = $false; Label = 'INVALID' }
++        }
++      }
++    }
++  }
++  'Install' {
++    Assert-Id $Id
++    if (-not $BundlePath) { throw '-BundlePath is required for Install' }
++    $source = (Resolve-Path -LiteralPath $BundlePath).Path
++    if (-not (Test-Path -LiteralPath $source -PathType Container)) { throw 'BundlePath must be an unpacked bundle directory' }
++    $source = [System.IO.Path]::GetFullPath($source).TrimEnd('\')
++    $final = Get-VersionPath $Id
++    $versionsRoot = [System.IO.Path]::GetFullPath((Join-Path (Get-InstallRoot) 'versions')).TrimEnd('\')
++    if ($source -ieq (Get-InstallRoot) -or
++        $source.StartsWith((Get-InstallRoot) + '\', [System.StringComparison]::OrdinalIgnoreCase) -or
++        (Get-InstallRoot).StartsWith($source + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
++      throw 'Bundle source and installation root overlap; refusing recursive or self-copy'
++    }
++    if (-not $final.StartsWith($versionsRoot + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
++      throw 'Final version path escaped versions directory'
++    }
++    if (Test-Path -LiteralPath $final) { throw "Refusing to overwrite existing version: $Id" }
++    $parsed = Assert-BundleDirectory $source $Id
++    $rootPath = Get-InstallRoot
++    New-Item -ItemType Directory -Path $versionsRoot -Force | Out-Null
++    $stage = Join-Path $versionsRoot ('.install-' + [guid]::NewGuid().ToString('N'))
++    $stage = [System.IO.Path]::GetFullPath($stage)
++    if (-not $stage.StartsWith($versionsRoot + '\', [System.StringComparison]::OrdinalIgnoreCase) -or
++        -not $final.StartsWith($versionsRoot + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
++      throw 'Install stage or final path escaped versions directory'
++    }
++    if (Test-Path -LiteralPath $stage) { throw "Install staging path already exists: $stage" }
++    Copy-Item -LiteralPath $source -Destination $stage -Recurse
++    $stagedManifest = Assert-BundleDirectory $stage $Id
++    if ($stagedManifest.bundleHash -cne $parsed.bundleHash) { throw 'Staged bundle manifest changed during copy' }
++    if (Test-Path -LiteralPath $final) { throw "Refusing to overwrite existing version: $Id" }
++    [System.IO.Directory]::Move($stage, $final)
++    Write-Host "Installed immutable personal build: $Id (not activated)"
++  }
++  'Activate' { Set-Active $Id }
++  'Rollback' {
++    $state = Get-State
++    if (-not $state.previous) { throw 'No previous installed build is available for rollback' }
++    Set-Active ([string]$state.previous)
++  }
++  'Launch' {
++    $state = Get-State
++    if (-not $state.current) { throw 'No active personal build. Run personal-deploy.ps1 -Mode List/Activate first.' }
++    $version = Get-ValidatedVersion ([string]$state.current)
++    $exe = Join-Path $version.Path 'pi-gui.exe'
++    $dataRoot = Join-Path $env:LOCALAPPDATA 'pi-gui-proxy-build'
++    $priorExists = Test-Path Env:PI_APP_USER_DATA_DIR
++    $priorValue = $env:PI_APP_USER_DATA_DIR
++    try {
++      $env:PI_APP_USER_DATA_DIR = $dataRoot
++      Start-Process -FilePath $exe -WorkingDirectory $version.Path
++    } finally {
++      if ($priorExists) { $env:PI_APP_USER_DATA_DIR = $priorValue }
++      else { Remove-Item Env:PI_APP_USER_DATA_DIR -ErrorAction SilentlyContinue }
++    }
++  }
++}
+diff --git a/apps/desktop/scripts/personal-deploy.test.ps1 b/apps/desktop/scripts/personal-deploy.test.ps1
+new file mode 100644
+index 0000000..83ab801
+--- /dev/null
++++ b/apps/desktop/scripts/personal-deploy.test.ps1
+@@ -0,0 +1,131 @@
++$ErrorActionPreference = 'Stop'
++Set-StrictMode -Version Latest
++
++$deploy = Join-Path $PSScriptRoot 'personal-deploy.ps1'
++$fixture = Join-Path $PSScriptRoot 'fixtures/personal-build-valid'
++$testArtifacts = Join-Path ([System.IO.Path]::GetTempPath()) ('pi-gui-deploy-test-' + [guid]::NewGuid().ToString('N'))
++$root = Join-Path $testArtifacts 'deployment root'
++
++function Invoke-ExpectedFailure([string[]]$Arguments, [string]$Description) {
++  & powershell.exe -NoLogo -NoProfile -ExecutionPolicy RemoteSigned -File $deploy @Arguments
++  if ($LASTEXITCODE -eq 0) { throw "Expected failure: $Description" }
++  Write-Host "ok - $Description"
++}
++
++function New-LaunchProbe([string]$ExePath) {
++  $code = @'
++using System;
++using System.IO;
++public static class PersonalBuildLaunchProbe {
++  public static int Main() {
++    File.WriteAllText(Environment.GetEnvironmentVariable("PI_TEST_ENV_OUTPUT"),
++      Environment.GetEnvironmentVariable("PI_APP_USER_DATA_DIR") ?? "<missing>");
++    return 0;
++  }
++}
++'@
++  Add-Type -TypeDefinition $code -OutputAssembly $ExePath -OutputType ConsoleApplication
++}
++
++function New-SyntheticBundle([string]$Id, [string]$Path, [switch]$BadHash) {
++  Copy-Item -LiteralPath $fixture -Destination $Path -Recurse
++  $manifestPath = Join-Path $Path 'manifest.json'
++  $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
++  $manifest.id = $Id
++  if ($BadHash) { $manifest.bundleHash = ('0' * 64) }
++  [System.IO.File]::WriteAllText($manifestPath, ($manifest | ConvertTo-Json), [System.Text.UTF8Encoding]::new($false))
++}
++
++try {
++  $firstBundle = Join-Path $testArtifacts 'bundle-first'
++  New-Item -ItemType Directory -Path $root -Force | Out-Null
++  New-SyntheticBundle '9.9.9-proxy.9' $firstBundle
++  $common = @('-Root', $root)
++  & powershell.exe -NoLogo -NoProfile -ExecutionPolicy RemoteSigned -File $deploy -Mode Install -Id '9.9.9-proxy.9' -BundlePath $firstBundle @common
++  if ($LASTEXITCODE -ne 0) { throw 'First synthetic install failed' }
++  Write-Host 'ok - valid synthetic bundle installs without activation'
++
++  Invoke-ExpectedFailure (@('-Mode', 'Install', '-Id', '9.9.9-proxy.9', '-BundlePath', $firstBundle) + $common) 'existing version is never overwritten'
++  Invoke-ExpectedFailure (@('-Mode', 'Activate', '-Id', '..\outside') + $common) 'path traversal build id is rejected'
++  Invoke-ExpectedFailure (@('-Mode', 'Activate', '-Id', '9.9.8-proxy.8') + $common) 'unknown version is not activated'
++  Invoke-ExpectedFailure (@('-Mode', 'Install', '-Id', '9.9.12-proxy.12', '-BundlePath', $root) + $common) 'bundle source overlapping install root is rejected'
++
++  $secondBundle = Join-Path $testArtifacts 'bundle-second'
++  New-SyntheticBundle '9.9.10-proxy.10' $secondBundle
++  & powershell.exe -NoLogo -NoProfile -ExecutionPolicy RemoteSigned -File $deploy -Mode Install -Id '9.9.10-proxy.10' -BundlePath $secondBundle @common
++  if ($LASTEXITCODE -ne 0) { throw 'Second synthetic install failed' }
++  & powershell.exe -NoLogo -NoProfile -ExecutionPolicy RemoteSigned -File $deploy -Mode Activate -Id '9.9.9-proxy.9' @common
++  if ($LASTEXITCODE -ne 0) { throw 'First activation failed' }
++  & powershell.exe -NoLogo -NoProfile -ExecutionPolicy RemoteSigned -File $deploy -Mode Activate -Id '9.9.10-proxy.10' @common
++  if ($LASTEXITCODE -ne 0) { throw 'Second activation failed' }
++  & powershell.exe -NoLogo -NoProfile -ExecutionPolicy RemoteSigned -File $deploy -Mode Rollback @common
++  if ($LASTEXITCODE -ne 0) { throw 'Rollback failed' }
++  $statePath = Join-Path $root 'state.json'
++  $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
++  if ($state.current -cne '9.9.9-proxy.9') { throw "Unexpected active version after rollback: $($state.current)" }
++  Write-Host 'ok - rollback selects the previously active build'
++
++  Set-Content -LiteralPath (Join-Path $root 'versions/9.9.10-proxy.10/resources/app.asar') -Value 'corrupted fixture'
++  Invoke-ExpectedFailure (@('-Mode', 'Rollback') + $common) 'corrupt rollback target is rejected'
++  $afterFailure = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
++  if ($afterFailure.current -cne '9.9.9-proxy.9') { throw 'Failed rollback changed the active pointer' }
++  Write-Host 'ok - failed rollback leaves the active version unchanged'
++
++  $badBundle = Join-Path $testArtifacts 'bundle-bad-hash'
++  New-SyntheticBundle '9.9.11-proxy.11' $badBundle -BadHash
++  Invoke-ExpectedFailure (@('-Mode', 'Install', '-Id', '9.9.11-proxy.11', '-BundlePath', $badBundle) + $common) 'bundle hash mismatch prevents installation'
++  if (Test-Path -LiteralPath (Join-Path $root 'versions/9.9.11-proxy.11')) { throw 'Failed install left an installed version' }
++  $afterInstallFailure = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
++  if ($afterInstallFailure.current -cne '9.9.9-proxy.9') { throw 'Failed install changed the active pointer' }
++  Write-Host 'ok - failed install leaves no version and cannot change activation'
++
++  # Exercise direct Launch scope and a real generated CMD entry point from a
++  # root containing spaces and CMD metacharacters.
++  $launchBundle = Join-Path $testArtifacts 'bundle-launch'
++  New-SyntheticBundle '9.9.12-proxy.12' $launchBundle
++  New-LaunchProbe (Join-Path $launchBundle 'pi-gui.exe')
++  & powershell.exe -NoLogo -NoProfile -ExecutionPolicy RemoteSigned -File $deploy -Mode Install -Id '9.9.12-proxy.12' -BundlePath $launchBundle @common
++  if ($LASTEXITCODE -ne 0) { throw 'Launch probe install failed' }
++  & powershell.exe -NoLogo -NoProfile -ExecutionPolicy RemoteSigned -File $deploy -Mode Activate -Id '9.9.12-proxy.12' @common
++  if ($LASTEXITCODE -ne 0) { throw 'Launch probe activation failed' }
++
++  $outputPath = Join-Path $root 'direct-launch-env.txt'
++  $env:PI_TEST_ENV_OUTPUT = $outputPath
++  $env:PI_APP_USER_DATA_DIR = 'sentinel-restore-check'
++  try {
++    & $deploy -Mode Launch -Root $root
++    $deadline = [DateTime]::UtcNow.AddSeconds(10)
++    while (-not (Test-Path -LiteralPath $outputPath) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 100 }
++    if ((Get-Content -LiteralPath $outputPath -Raw) -ne (Join-Path $env:LOCALAPPDATA 'pi-gui-proxy-build')) { throw 'Direct launch child inherited the wrong app data path' }
++    if ($env:PI_APP_USER_DATA_DIR -cne 'sentinel-restore-check') { throw 'Direct launch did not restore the caller environment' }
++  } finally {
++    Remove-Item Env:PI_TEST_ENV_OUTPUT -ErrorAction SilentlyContinue
++    Remove-Item Env:PI_APP_USER_DATA_DIR -ErrorAction SilentlyContinue
++  }
++  Write-Host 'ok - direct launch scopes user data to child and restores the caller environment'
++
++  $cmdRoot = Join-Path $testArtifacts 'launcher root & spaces'
++  $cmdBundle = Join-Path $testArtifacts 'bundle-cmd'
++  New-SyntheticBundle '9.9.13-proxy.13' $cmdBundle
++  New-LaunchProbe (Join-Path $cmdBundle 'pi-gui.exe')
++  & powershell.exe -NoLogo -NoProfile -ExecutionPolicy RemoteSigned -File $deploy -Mode Install -Id '9.9.13-proxy.13' -BundlePath $cmdBundle -Root $cmdRoot
++  if ($LASTEXITCODE -ne 0) { throw 'CMD probe install failed' }
++  & powershell.exe -NoLogo -NoProfile -ExecutionPolicy RemoteSigned -File $deploy -Mode Activate -Id '9.9.13-proxy.13' -Root $cmdRoot
++  if ($LASTEXITCODE -ne 0) { throw 'CMD probe activation failed' }
++  & $deploy -Mode Bootstrap -Root $cmdRoot
++  $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut((Join-Path $cmdRoot 'Start pi-gui proxy.lnk'))
++  if ($shortcut.Arguments -notmatch '-ExecutionPolicy RemoteSigned') { throw 'Start shortcut must use per-process RemoteSigned' }
++  if ($shortcut.Arguments -notmatch [regex]::Escape('"' + $cmdRoot + '"')) { throw 'Start shortcut did not quote the fixed root argument' }
++  $cmdOutput = Join-Path $root 'cmd-launch-env.txt'
++  $env:PI_TEST_ENV_OUTPUT = $cmdOutput
++  $cmdLine = '/d /c ""{0}"' -f (Join-Path $cmdRoot 'pi-gui-proxy.cmd')
++  $cmdProcess = Start-Process -FilePath $env:ComSpec -ArgumentList $cmdLine -WindowStyle Hidden -PassThru -Wait
++  if ($cmdProcess.ExitCode -ne 0) { throw "CMD launcher exited with $($cmdProcess.ExitCode)" }
++  if (-not (Test-Path -LiteralPath $cmdOutput)) { throw 'Generated CMD launcher did not start its selected build' }
++  if ((Get-Content -LiteralPath $cmdOutput -Raw) -ne (Join-Path $env:LOCALAPPDATA 'pi-gui-proxy-build')) { throw 'CMD launcher child inherited the wrong app data path' }
++  Remove-Item Env:PI_TEST_ENV_OUTPUT -ErrorAction SilentlyContinue
++  Write-Host 'ok - generated CMD launcher safely forwards a root with spaces and ampersand'
++}
++finally {
++  Write-Host "Synthetic deployment artifacts retained for diagnosis: $testArtifacts"
++}
+diff --git a/apps/desktop/src/app/secondary-surfaces.tsx b/apps/desktop/src/app/secondary-surfaces.tsx
+index 27bacf0..eacf7de 100644
+--- a/apps/desktop/src/app/secondary-surfaces.tsx
++++ b/apps/desktop/src/app/secondary-surfaces.tsx
+@@ -426,6 +426,7 @@ export function SecondarySurfaces({
+           themeMode={snapshot.themeMode}
+           themePresetId={snapshot.themePresetId}
+           enableTransparency={snapshot.enableTransparency}
++          interfaceZoom={snapshot.interfaceZoom}
+           onLoginProvider={handleLoginProvider}
+           onSelectSection={onSelectSettingsSection}
+           onLogoutProvider={handleLogoutProvider}
+@@ -451,6 +452,11 @@ export function SecondarySurfaces({
+               },
+             );
+           }}
++          onSetInterfaceZoom={(zoom) => {
++            void updateSnapshot(setSnapshot, () => api.setInterfaceZoom(zoom)).catch(
++              (error: unknown) => console.error("[renderer] setInterfaceZoom failed", error),
++            );
++          }}
+         />
+       )}
+     </SecondarySurface>
+diff --git a/apps/desktop/src/features/settings/settings-appearance-section.tsx b/apps/desktop/src/features/settings/settings-appearance-section.tsx
+index 632e5dc..38e4c52 100644
+--- a/apps/desktop/src/features/settings/settings-appearance-section.tsx
++++ b/apps/desktop/src/features/settings/settings-appearance-section.tsx
+@@ -1,4 +1,9 @@
+-import type { ThemeMode, ThemePresetId } from "../../../contracts/desktop-state";
++import {
++  interfaceZoomLevels,
++  type InterfaceZoom,
++  type ThemeMode,
++  type ThemePresetId,
++} from "../../../contracts/desktop-state";
+ import { SettingsSelect, SettingsSwitch } from "./settings-controls";
+ import { SettingsGroup, SettingsRow } from "./settings-utils";
+ import type { CSSProperties } from "react";
+@@ -12,6 +17,8 @@ interface SettingsAppearanceSectionProps {
+   readonly onSetThemePresetId: (presetId: ThemePresetId) => void;
+   readonly enableTransparency: boolean;
+   readonly onSetEnableTransparency: (enabled: boolean) => void;
++  readonly interfaceZoom: InterfaceZoom;
++  readonly onSetInterfaceZoom: (zoom: InterfaceZoom) => void;
+ }
+ 
+ const THEME_MODES: readonly { readonly mode: ThemeMode; readonly label: string }[] = [
+@@ -27,6 +34,8 @@ export function SettingsAppearanceSection({
+   onSetThemePresetId,
+   enableTransparency,
+   onSetEnableTransparency,
++  interfaceZoom,
++  onSetInterfaceZoom,
+ }: SettingsAppearanceSectionProps) {
+   const activePreset = themePreset(themePresetId);
+   const { variant } = useActiveTheme();
+@@ -63,6 +72,30 @@ export function SettingsAppearanceSection({
+         </div>
+       </SettingsGroup>
+ 
++      <SettingsGroup>
++        <SettingsRow title="Interface zoom" description="Scale the entire app interface.">
++          <span className="settings-preset-control">
++            <SettingsSelect
++              label="Interface zoom"
++              options={interfaceZoomLevels.map((zoom) => ({
++                value: String(zoom),
++                label: `${zoom}%`,
++              }))}
++              value={String(interfaceZoom)}
++              onChange={(value) => onSetInterfaceZoom(Number(value) as InterfaceZoom)}
++            />
++            <button
++              className="button button--secondary"
++              disabled={interfaceZoom === 100}
++              type="button"
++              onClick={() => onSetInterfaceZoom(100)}
++            >
++              Reset to 100%
++            </button>
++          </span>
++        </SettingsRow>
++      </SettingsGroup>
++
+       <SettingsGroup>
+         <SettingsRow title="Color preset" description={activePreset.description}>
+           <span className="settings-preset-control">
+diff --git a/apps/desktop/src/features/settings/settings-general-section.tsx b/apps/desktop/src/features/settings/settings-general-section.tsx
+index 86ace56..63a8215 100644
+--- a/apps/desktop/src/features/settings/settings-general-section.tsx
++++ b/apps/desktop/src/features/settings/settings-general-section.tsx
+@@ -3,6 +3,7 @@ import type { RuntimeSnapshot } from "@pi-gui/session-driver/runtime-types";
+ import type { ModelSettingsScopeMode } from "../../../contracts/desktop-state";
+ import { SettingsSegmented, SettingsSwitch } from "./settings-controls";
+ import { SettingsGroup, SettingsRow } from "./settings-utils";
++import { SettingsProxyStatus } from "./settings-proxy-status";
+ 
+ interface SettingsGeneralSectionProps {
+   readonly runtime?: RuntimeSnapshot;
+@@ -84,6 +85,7 @@ export function SettingsGeneralSection({
+           />
+         </SettingsRow>
+       </SettingsGroup>
++      <SettingsProxyStatus />
+     </>
+   );
+ }
+diff --git a/apps/desktop/src/features/settings/settings-proxy-status.tsx b/apps/desktop/src/features/settings/settings-proxy-status.tsx
+new file mode 100644
+index 0000000..84b32a7
+--- /dev/null
++++ b/apps/desktop/src/features/settings/settings-proxy-status.tsx
+@@ -0,0 +1,119 @@
++import { useCallback, useEffect, useState } from "react";
++import type { DesktopProxyStatus } from "../../../contracts/proxy-status";
++import { SettingsGroup, SettingsRow } from "./settings-utils";
++
++export function SettingsProxyStatus() {
++  const [status, setStatus] = useState<DesktopProxyStatus>();
++  const [loading, setLoading] = useState(true);
++  const [error, setError] = useState<string>();
++  const [openError, setOpenError] = useState<string>();
++
++  const refresh = useCallback(async () => {
++    setLoading(true);
++    setError(undefined);
++    try {
++      const next = await window.piApp?.getProxyStatus();
++      if (!next) throw new Error("Pi settings status is unavailable.");
++      setStatus(next);
++    } catch {
++      setError("Could not read the proxy status. Restart Pi GUI and try again.");
++    } finally {
++      setLoading(false);
++    }
++  }, []);
++
++  useEffect(() => {
++    void refresh().catch(() => {
++      setError("Could not read the proxy status. Restart Pi GUI and try again.");
++      setLoading(false);
++    });
++  }, [refresh]);
++
++  const openSettings = async () => {
++    setOpenError(undefined);
++    try {
++      const failure = await window.piApp?.openProxySettings();
++      if (failure) setOpenError(failure);
++    } catch {
++      setOpenError("Could not open Pi settings. Check that settings.json is available.");
++    }
++  };
++
++  return (
++    <SettingsGroup
++      title="Pi and proxy"
++      description="This shows the proxy configuration used at startup. NO_PROXY can send matching requests directly. Proxy changes take effect after you fully quit and restart Pi GUI."
++    >
++      {loading && !status ? <p role="status">Loading Pi and proxy status…</p> : null}
++      {error ? <p role="alert">{error}</p> : null}
++      {status ? (
++        <>
++          <SettingsRow title="Personal version" description={`Build ${status.buildLabel}`}>
++            <span>{status.version}</span>
++          </SettingsRow>
++          <SettingsRow title="Proxy source">
++            <span>{sourceLabel(status.source)}</span>
++          </SettingsRow>
++          <SettingsRow title="HTTP proxy">
++            <span>{redactProxyAddress(status.httpProxy)}</span>
++          </SettingsRow>
++          <SettingsRow title="HTTPS proxy">
++            <span>{redactProxyAddress(status.httpsProxy)}</span>
++          </SettingsRow>
++          <SettingsRow title="NO_PROXY">
++            <span>{status.noProxy || "Not set"}</span>
++          </SettingsRow>
++        </>
++      ) : null}
++      <div className="settings-row">
++        <div className="settings-row__actions">
++          <button
++            className="button button--secondary"
++            type="button"
++            disabled={loading}
++            onClick={() => {
++              void refresh().catch(() =>
++                setError("Could not read the proxy status. Restart Pi GUI and try again."),
++              );
++            }}
++          >
++            Refresh status
++          </button>
++          <button
++            className="button button--secondary"
++            type="button"
++            onClick={() => {
++              void openSettings().catch(() =>
++                setOpenError("Could not open Pi settings. Check that settings.json is available."),
++              );
++            }}
++          >
++            Open Pi settings
++          </button>
++        </div>
++      </div>
++      {openError ? <p role="alert">{openError}</p> : null}
++    </SettingsGroup>
++  );
++}
++
++function sourceLabel(source: DesktopProxyStatus["source"]): string {
++  switch (source) {
++    case "pi-settings":
++      return "Pi settings";
++    case "environment":
++      return "Environment variables";
++    case "direct":
++      return "Direct connection";
++  }
++}
++
++function redactProxyAddress(value: string | null): string {
++  if (!value) return "Direct connection";
++  try {
++    const url = new URL(value);
++    return `${url.protocol}//${url.host}`;
++  } catch {
++    return "Configured proxy";
++  }
++}
+diff --git a/apps/desktop/src/features/settings/settings-view.tsx b/apps/desktop/src/features/settings/settings-view.tsx
+index d2744e8..0d24d49 100644
+--- a/apps/desktop/src/features/settings/settings-view.tsx
++++ b/apps/desktop/src/features/settings/settings-view.tsx
+@@ -7,6 +7,7 @@ import type {
+   ModelSettingsScopeMode,
+   NotificationPreferences,
+   ThemePresetId,
++  InterfaceZoom,
+   WorkspaceRecord,
+ } from "../../../contracts/desktop-state";
+ import type {
+@@ -39,6 +40,7 @@ interface SettingsViewProps {
+   readonly themeMode: "system" | "light" | "dark";
+   readonly themePresetId: ThemePresetId;
+   readonly enableTransparency: boolean;
++  readonly interfaceZoom: InterfaceZoom;
+   readonly onSetModelSettingsScopeMode: (mode: ModelSettingsScopeMode) => void;
+   readonly onSetDefaultModel: (provider: string, modelId: string) => void;
+   readonly onSetThinkingLevel: (
+@@ -59,6 +61,7 @@ interface SettingsViewProps {
+   readonly onSetThemeMode: (mode: "system" | "light" | "dark") => void;
+   readonly onSetThemePresetId: (presetId: ThemePresetId) => void;
+   readonly onSetEnableTransparency: (enabled: boolean) => void;
++  readonly onSetInterfaceZoom: (zoom: InterfaceZoom) => void;
+ }
+ 
+ export function SettingsView({
+@@ -76,6 +79,7 @@ export function SettingsView({
+   themeMode,
+   themePresetId,
+   enableTransparency,
++  interfaceZoom,
+   onSetModelSettingsScopeMode,
+   onSetDefaultModel,
+   onSetThinkingLevel,
+@@ -94,6 +98,7 @@ export function SettingsView({
+   onSetThemeMode,
+   onSetThemePresetId,
+   onSetEnableTransparency,
++  onSetInterfaceZoom,
+ }: SettingsViewProps) {
+   const definition = settingsSectionDefinition(section);
+   const header = (
+@@ -142,6 +147,8 @@ export function SettingsView({
+               onSetThemePresetId={onSetThemePresetId}
+               enableTransparency={enableTransparency}
+               onSetEnableTransparency={onSetEnableTransparency}
++              interfaceZoom={interfaceZoom}
++              onSetInterfaceZoom={onSetInterfaceZoom}
+             />
+           ) : null}
+ 
+diff --git a/apps/desktop/src/ui/pane-resize-handle.tsx b/apps/desktop/src/ui/pane-resize-handle.tsx
+index 170bd8f..d62e387 100644
+--- a/apps/desktop/src/ui/pane-resize-handle.tsx
++++ b/apps/desktop/src/ui/pane-resize-handle.tsx
+@@ -32,6 +32,7 @@ export function PaneResizeHandle({
+   const boundsRef = useRef(bounds);
+   boundsRef.current = bounds;
+   const [size, setSize] = useState({ width: 0, min: 0, max: 0 });
++  const sizeRef = useRef(size);
+   const [resizing, setResizing] = useState(false);
+ 
+   useEffect(() => {
+@@ -40,11 +41,13 @@ export function PaneResizeHandle({
+     if (!pane || !container) return;
+     const measure = () => {
+       const { min, max } = boundsRef.current(pane, container);
+-      setSize({
++      const next = {
+         width: Math.round(pane.getBoundingClientRect().width),
+         min: Math.min(min, max),
+         max,
+-      });
++      };
++      sizeRef.current = next;
++      setSize(next);
+     };
+     const observer = new ResizeObserver(measure);
+     observer.observe(pane);
+@@ -54,7 +57,15 @@ export function PaneResizeHandle({
+   }, []);
+ 
+   const widen = edge === "right" ? 1 : -1;
+-  const resize = (width: number) => onResize(Math.max(size.min, Math.min(size.max, width)));
++  const resize = (width: number) => {
++    const current = sizeRef.current;
++    const next = Math.max(current.min, Math.min(current.max, width));
++    // Keep sequential key presses based on the requested width while the browser is
++    // still applying the previous resize and ResizeObserver has not measured it yet.
++    sizeRef.current = { ...current, width: next };
++    setSize(sizeRef.current);
++    onResize(next);
++  };
+   return (
+     <div
+       ref={ref}
+@@ -93,9 +104,9 @@ export function PaneResizeHandle({
+       onKeyDown={(event) => {
+         const next =
+           event.key === "ArrowRight"
+-            ? size.width + widen * 20
++            ? sizeRef.current.width + widen * 20
+             : event.key === "ArrowLeft"
+-              ? size.width - widen * 20
++              ? sizeRef.current.width - widen * 20
+               : event.key === "Home"
+                 ? size.min
+                 : event.key === "End"
+diff --git a/apps/desktop/tests/core/interface-zoom.spec.ts b/apps/desktop/tests/core/interface-zoom.spec.ts
+new file mode 100644
+index 0000000..831d268
+--- /dev/null
++++ b/apps/desktop/tests/core/interface-zoom.spec.ts
+@@ -0,0 +1,368 @@
++import { mkdir, readFile, writeFile } from "node:fs/promises";
++import { join } from "node:path";
++import { expect, test, type Locator, type Page } from "@playwright/test";
++import {
++  createNamedThread,
++  desktopShortcut,
++  getDesktopState,
++  launchDesktop,
++  launchDesktopByExecutable,
++  makeUserDataDir,
++  makeWorkspace,
++  seedTranscriptMessages,
++  waitForWorkspaceByPath,
++  type DesktopHarness,
++} from "../helpers/electron-app";
++
++const zoomLevels = [90, 100, 110, 125, 150] as const;
++const packagedExecutable = process.env.PI_PROXY_EXECUTABLE?.trim();
++
++async function launchZoomApp(userDataDir: string, workspacePath: string) {
++  const options = {
++    initialWorkspaces: [workspacePath],
++    testMode: "foreground" as const,
++  };
++  return packagedExecutable
++    ? launchDesktopByExecutable(packagedExecutable, userDataDir, options)
++    : launchDesktop(userDataDir, options);
++}
++
++async function setWindowSize(harness: DesktopHarness, window: Page): Promise<void> {
++  const marker = `interface-zoom-${Date.now()}-${Math.random()}`;
++  await window.evaluate((value) => {
++    Object.assign(globalThis.window, { __interfaceZoomWindowMarker: value });
++  }, marker);
++  await harness.electronApp.evaluate(async ({ BrowserWindow }, expectedMarker) => {
++    const matched = await Promise.all(
++      BrowserWindow.getAllWindows().map(async (candidate) => ({
++        candidate,
++        marker: (await candidate.webContents
++          .executeJavaScript("window.__interfaceZoomWindowMarker", true)
++          .catch(() => undefined)) as unknown,
++      })),
++    );
++    const window = matched.find((entry) => entry.marker === expectedMarker)?.candidate;
++    if (!window) throw new Error("Could not find the marked Electron window");
++    window.setSize(1280, 800);
++    const [width, height] = window.getSize();
++    if (width !== 1280 || height !== 800) {
++      throw new Error(`Expected 1280x800 Electron window, received ${width}x${height}`);
++    }
++    await window.webContents.executeJavaScript(
++      "new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))",
++    );
++  }, marker);
++}
++
++async function sendNativeShortcut(
++  harness: DesktopHarness,
++  page: Page,
++  keyCode: string,
++  modifiers: readonly ("control" | "shift" | "alt")[],
++): Promise<void> {
++  const marker = `zoom-native-key-${Date.now()}-${Math.random()}`;
++  await page.evaluate((value) => {
++    Object.assign(globalThis.window, { __interfaceZoomNativeKeyMarker: value });
++  }, marker);
++  await harness.electronApp.evaluate(async ({ BrowserWindow }, args) => {
++    const matches = await Promise.all(BrowserWindow.getAllWindows().map(async (candidate) => ({
++      candidate,
++      marker: (await candidate.webContents
++        .executeJavaScript("window.__interfaceZoomNativeKeyMarker", true)
++        .catch(() => undefined)) as unknown,
++    })));
++    const target = matches.find((entry) => entry.marker === args.marker)?.candidate;
++    if (!target) throw new Error("Could not find the marked Electron window for keyboard input");
++    target.show();
++    target.focus();
++    const keyCodes = { control: "Control", shift: "Shift", alt: "Alt" } as const;
++    const activeModifiers: string[] = [];
++    for (const modifier of args.modifiers) {
++      const modifierKey = keyCodes[modifier];
++      target.webContents.sendInputEvent({ type: "keyDown", keyCode: modifierKey });
++      activeModifiers.push(modifier);
++    }
++    target.webContents.sendInputEvent({
++      type: "keyDown",
++      keyCode: args.keyCode,
++      modifiers: activeModifiers,
++    });
++    target.webContents.sendInputEvent({
++      type: "keyUp",
++      keyCode: args.keyCode,
++      modifiers: activeModifiers,
++    });
++    for (const modifier of [...args.modifiers].reverse()) {
++      const modifierKey = keyCodes[modifier];
++      target.webContents.sendInputEvent({
++        type: "keyUp",
++        keyCode: modifierKey,
++        modifiers: activeModifiers,
++      });
++      activeModifiers.splice(activeModifiers.indexOf(modifier), 1);
++    }
++  }, { marker, keyCode, modifiers });
++}
++
++async function zoomFactorForPage(harness: DesktopHarness, page: Page): Promise<number> {
++  const marker = `zoom-read-${Date.now()}-${Math.random()}`;
++  await page.evaluate((value) => {
++    Object.assign(globalThis.window, { __interfaceZoomReadMarker: value });
++  }, marker);
++  return harness.electronApp.evaluate(async ({ BrowserWindow }, expectedMarker) => {
++    const windows = await Promise.all(
++      BrowserWindow.getAllWindows().map(async (candidate) => ({
++        candidate,
++        marker: (await candidate.webContents
++          .executeJavaScript("window.__interfaceZoomReadMarker", true)
++          .catch(() => undefined)) as unknown,
++      })),
++    );
++    const target = windows.find((entry) => entry.marker === expectedMarker)?.candidate;
++    if (!target) throw new Error("Could not find the marked Electron window");
++    return target.webContents.getZoomFactor();
++  }, marker);
++}
++
++async function expectZoom(harness: DesktopHarness, page: Page, percent: number): Promise<void> {
++  await expect
++    .poll(async () => zoomFactorForPage(harness, page), { timeout: 5_000 })
++    .toBeCloseTo(percent / 100, 2);
++  await expect.poll(async () => (await getDesktopState(page)).interfaceZoom).toBe(percent);
++}
++
++async function expectWithinViewport(locator: Locator, page: Page): Promise<void> {
++  await locator.scrollIntoViewIfNeeded();
++  const geometry = await locator.evaluate((element) => {
++    const rect = element.getBoundingClientRect();
++    return {
++      x: rect.x,
++      y: rect.y,
++      right: rect.right,
++      bottom: rect.bottom,
++      width: rect.width,
++      height: rect.height,
++      viewportWidth: window.visualViewport?.width ?? window.innerWidth,
++      viewportHeight: window.visualViewport?.height ?? window.innerHeight,
++      devicePixelRatio: window.devicePixelRatio,
++    };
++  });
++  expect(geometry.width).toBeGreaterThan(0);
++  expect(geometry.height).toBeGreaterThan(0);
++  expect(geometry.x).toBeGreaterThanOrEqual(0);
++  expect(geometry.y).toBeGreaterThanOrEqual(0);
++  expect(geometry.right).toBeLessThanOrEqual(geometry.viewportWidth);
++  expect(geometry.bottom).toBeLessThanOrEqual(geometry.viewportHeight);
++}
++
++async function captureNativeWindow(
++  harness: DesktopHarness,
++  page: Page,
++  proofDir: string,
++  name: string,
++): Promise<void> {
++  const marker = `zoom-native-${Date.now()}-${Math.random()}`;
++  const renderer = await page.evaluate((value) => {
++    Object.assign(globalThis.window, { __interfaceZoomNativeMarker: value });
++    return {
++      innerWidth: window.innerWidth,
++      innerHeight: window.innerHeight,
++      devicePixelRatio: window.devicePixelRatio,
++      visualViewport: window.visualViewport
++        ? { width: window.visualViewport.width, height: window.visualViewport.height, scale: window.visualViewport.scale }
++        : null,
++      elements: Object.fromEntries(
++        [".sidebar", '[data-testid="composer"]', '[aria-label="Interface zoom"]'].flatMap((selector) => {
++          const element = document.querySelector(selector);
++          if (!element) return [];
++          const rect = element.getBoundingClientRect();
++          return [[selector, { x: rect.x, y: rect.y, right: rect.right, bottom: rect.bottom, width: rect.width, height: rect.height }]];
++        }),
++      ),
++    };
++  }, marker);
++  const native = await harness.electronApp.evaluate(async ({ BrowserWindow }, expectedMarker) => {
++    const matches = await Promise.all(BrowserWindow.getAllWindows().map(async (candidate) => ({
++      candidate,
++      marker: (await candidate.webContents
++        .executeJavaScript("window.__interfaceZoomNativeMarker", true)
++        .catch(() => undefined)) as unknown,
++    })));
++    const target = matches.find((entry) => entry.marker === expectedMarker)?.candidate;
++    if (!target) throw new Error("Could not find the marked Electron window for native capture");
++    const image = await target.webContents.capturePage();
++    const size = image.getSize();
++    return {
++      width: size.width,
++      height: size.height,
++      zoomFactor: target.webContents.getZoomFactor(),
++      zoomLevel: target.webContents.getZoomLevel(),
++      pngBase64: image.toPNG().toString("base64"),
++    };
++  }, marker);
++  const { pngBase64, ...nativeMetadata } = native;
++  await writeFile(join(proofDir, `${name}-native.png`), Buffer.from(pngBase64, "base64"));
++  await writeFile(
++    join(proofDir, `${name}-geometry.json`),
++    JSON.stringify({ renderer, native: nativeMetadata }, null, 2),
++  );
++}
++
++async function openAppearance(window: Page): Promise<void> {
++  await window.keyboard.press(desktopShortcut(","));
++  await expect(window.getByTestId("settings-surface")).toBeVisible();
++  await window.getByRole("button", { name: "Appearance", exact: true }).click();
++  await expect(window.getByLabel("Interface zoom")).toBeVisible();
++}
++
++async function openSecondWindow(harness: DesktopHarness, source: Page): Promise<Page> {
++  const before = new Set(harness.electronApp.windows());
++  await sendNativeShortcut(harness, source, "N", ["control", "shift"]);
++  await expect.poll(() => harness.electronApp.windows().length).toBe(before.size + 1);
++  const second = harness.electronApp.windows().find((candidate) => !before.has(candidate));
++  if (!second) throw new Error("Expected the new-window shortcut to create another window");
++  await second.waitForFunction(() => Boolean(globalThis.window.piApp));
++  return second;
++}
++
++test("applies interface zoom through Appearance, shortcuts, new windows and restart", async () => {
++  test.setTimeout(120_000);
++  const userDataDir = await makeUserDataDir("pi-gui-interface-zoom-");
++  const workspacePath = await makeWorkspace("interface-zoom");
++  const proofDir = process.env.PI_APP_INTERFACE_ZOOM_PROOF_DIR?.trim();
++  if (proofDir) await mkdir(proofDir, { recursive: true });
++
++  let harness = await launchZoomApp(userDataDir, workspacePath);
++
++  try {
++    const window = await harness.firstWindow();
++    await waitForWorkspaceByPath(window, workspacePath);
++    await createNamedThread(window, "Interface zoom fixture thread");
++    await seedTranscriptMessages(harness, window, {
++      count: 3,
++      textFactory: (index) => {
++        if (index === 0) {
++          return [
++            `Fixture content ${"long message used to exercise wrapping at high zoom. ".repeat(14)}`,
++            "",
++            "```ts",
++            `const zoom = ${index};`,
++            "```",
++          ].join("\n");
++        }
++        return `Additional local fixture message ${index}: ${"layout should remain usable. ".repeat(8)}`;
++      },
++    });
++    await window.getByTestId("transcript").getByText("const zoom = 0;").waitFor();
++    await setWindowSize(harness, window);
++
++    await openAppearance(window);
++    const select = window.getByLabel("Interface zoom");
++    for (const level of zoomLevels) {
++      await select.selectOption(String(level));
++      await expectZoom(harness, window, level);
++      if (level === 125 || level === 150) {
++        await expect(select).toBeVisible();
++        await expectWithinViewport(select, window);
++        if (proofDir) {
++          await window.screenshot({
++            path: join(proofDir, `appearance-${level}.png`),
++            fullPage: true,
++          });
++          await captureNativeWindow(harness, window, proofDir, `appearance-${level}`);
++        }
++        await window.getByRole("button", { name: "Back to app" }).scrollIntoViewIfNeeded();
++        await window.getByRole("button", { name: "Back to app" }).click();
++        await expect(window.getByTestId("composer")).toBeVisible();
++        await expect(window.getByTestId("transcript")).toBeVisible();
++        if (proofDir) {
++          await window.screenshot({
++            path: join(proofDir, `workbench-${level}.png`),
++            fullPage: true,
++          });
++          await captureNativeWindow(harness, window, proofDir, `workbench-${level}`);
++        }
++        await expectWithinViewport(window.locator(".sidebar"), window);
++        await expectWithinViewport(window.getByTestId("composer"), window);
++        await openAppearance(window);
++      }
++    }
++    await expect
++      .poll(async () => {
++        const [uiState, zoomState] = await Promise.all([
++          readFile(join(userDataDir, "ui-state.json"), "utf8"),
++          readFile(join(userDataDir, "interface-zoom.json"), "utf8"),
++        ]);
++        return {
++          legacyUiStateHasZoom: Object.hasOwn(JSON.parse(uiState) as object, "interfaceZoom"),
++          interfaceZoom: (JSON.parse(zoomState) as { readonly interfaceZoom?: unknown })
++            .interfaceZoom,
++        };
++      })
++      .toEqual({ legacyUiStateHasZoom: false, interfaceZoom: 150 });
++
++    // The menu accelerators and renderer key routing must share the same state.
++    await sendNativeShortcut(harness, window, "-", ["control"]);
++    await expectZoom(harness, window, 125);
++    await sendNativeShortcut(harness, window, "-", ["control"]);
++    await expectZoom(harness, window, 110);
++    await sendNativeShortcut(harness, window, "-", ["control"]);
++    await expectZoom(harness, window, 100);
++    await sendNativeShortcut(harness, window, "-", ["control"]);
++    await expectZoom(harness, window, 90);
++    await sendNativeShortcut(harness, window, "-", ["control"]);
++    await expectZoom(harness, window, 90);
++    await window.getByRole("button", { name: "Reset to 100%" }).click();
++    await expectZoom(harness, window, 100);
++    await sendNativeShortcut(harness, window, "=", ["control", "shift"]);
++    await expectZoom(harness, window, 110);
++
++    const secondWindow = await openSecondWindow(harness, window);
++    await expectZoom(harness, secondWindow, 110);
++
++    const invalidZoomError = await window.evaluate(async () => {
++      const app = window.piApp as unknown as {
++        setInterfaceZoom(value: unknown): Promise<unknown>;
++      };
++      try {
++        await app.setInterfaceZoom("125");
++      } catch (error) {
++        return String(error);
++      }
++      return "no error";
++    });
++    expect(invalidZoomError).toMatch(/Unsupported interface zoom/);
++    await expectZoom(harness, window, 110);
++    await expectZoom(harness, secondWindow, 110);
++
++    await window.getByLabel("Interface zoom").selectOption("125");
++    await expectZoom(harness, window, 125);
++    await expectZoom(harness, secondWindow, 125);
++    await window.getByRole("button", { name: "Reset to 100%" }).click();
++    await expectZoom(harness, window, 100);
++    await expectZoom(harness, secondWindow, 100);
++  } finally {
++    await harness.close();
++  }
++
++  harness = await launchZoomApp(userDataDir, workspacePath);
++  try {
++    const window = await harness.firstWindow();
++    await waitForWorkspaceByPath(window, workspacePath);
++    await expectZoom(harness, window, 100);
++    await openAppearance(window);
++    await window.getByLabel("Interface zoom").selectOption("150");
++    await expectZoom(harness, window, 150);
++  } finally {
++    await harness.close();
++  }
++
++  harness = await launchZoomApp(userDataDir, workspacePath);
++  try {
++    const window = await harness.firstWindow();
++    await waitForWorkspaceByPath(window, workspacePath);
++    await expectZoom(harness, window, 150);
++  } finally {
++    await harness.close();
++  }
++});
+diff --git a/apps/desktop/tests/core/proxy-status.spec.ts b/apps/desktop/tests/core/proxy-status.spec.ts
+new file mode 100644
+index 0000000..b355514
+--- /dev/null
++++ b/apps/desktop/tests/core/proxy-status.spec.ts
+@@ -0,0 +1,180 @@
++import { readFile, writeFile } from "node:fs/promises";
++import { dirname, join, resolve } from "node:path";
++import { mkdir } from "node:fs/promises";
++import { expect, test } from "@playwright/test";
++import {
++  desktopShortcut,
++  launchDesktop,
++  launchDesktopByExecutable,
++  makeUserDataDir,
++  makeWorkspace,
++  seedAgentDir,
++  waitForWorkspaceByPath,
++} from "../helpers/electron-app";
++
++const PACKAGED = process.env.PI_PROXY_PACKAGED === "1";
++const PACKAGED_EXECUTABLE =
++  process.env.PI_PROXY_EXECUTABLE ?? resolve("apps/desktop/release/win-unpacked/pi-gui.exe");
++
++test(`General renders the real startup proxy snapshot without exposing credentials (${PACKAGED ? "packaged" : "dev"})`, async () => {
++  const expectedLabel = (
++    JSON.parse(await readFile(resolve("apps/desktop/personal-build.json"), "utf8")) as {
++      readonly label: string;
++    }
++  ).label;
++  const explicit = await showGeneralForSnapshot({
++    name: "proxy-status-pi-settings",
++    settings: { httpProxy: "http://synthetic-user:synthetic-password@proxy.example:3128" },
++    envOverrides: {
++      HTTP_PROXY: undefined,
++      HTTPS_PROXY: undefined,
++      http_proxy: undefined,
++      https_proxy: undefined,
++      NO_PROXY: "localhost,127.0.0.1,.example.test",
++      no_proxy: undefined,
++    },
++  });
++  try {
++    const section = explicit.section;
++    expect(explicit.identity.isPackaged).toBe(PACKAGED);
++    if (PACKAGED) {
++      expect(resolve(explicit.identity.appPath)).toBe(
++        resolve(dirname(PACKAGED_EXECUTABLE), "resources", "app.asar"),
++      );
++    } else {
++      expect(resolve(explicit.identity.appPath)).toBe(resolve("apps/desktop"));
++    }
++    const snapshot = await explicit.window.evaluate(() => window.piApp?.getProxyStatus());
++    expect(snapshot).toMatchObject({
++      source: "pi-settings",
++      httpProxy: "http://proxy.example:3128",
++      httpsProxy: "http://proxy.example:3128",
++      noProxy: "localhost,127.0.0.1,.example.test",
++    });
++    await expect(section).toContainText("Pi settings");
++    await expect(section).toContainText("http://proxy.example:3128");
++    await expect(section).toContainText("localhost,127.0.0.1,.example.test");
++    await expect(section).not.toContainText("synthetic-user");
++    await expect(section).not.toContainText("synthetic-password");
++    await expect(section).not.toContainText(explicit.settingsPath);
++    await expect(section).toContainText(expectedLabel);
++    await expect(section.getByText(/^\d+\.\d+\.\d+/)).toBeVisible();
++    await expect(section).toContainText("quit and restart");
++    const screenshotPath = test
++      .info()
++      .outputPath(`proxy-status-general-${PACKAGED ? "packaged" : "final"}.png`);
++    await mkdir(dirname(screenshotPath), { recursive: true });
++    await explicit.window.screenshot({ path: screenshotPath, fullPage: false });
++
++    // The screen refreshes the startup snapshot; edits made after launch do not
++    // hot-apply to the active process or alter the snapshot shown here.
++    await writeFile(
++      explicit.settingsPath,
++      `${JSON.stringify({ httpProxy: "http://changed.example:9000" })}\n`,
++      "utf8",
++    );
++    await section.getByRole("button", { name: "Refresh status" }).click();
++    await expect(section).toContainText("http://proxy.example:3128");
++    await expect(section).not.toContainText("changed.example");
++
++    await explicit.harness.electronApp.evaluate(({ shell }) => {
++      shell.openPath = async (filePath) => {
++        (
++          globalThis as typeof globalThis & { __proxySettingsOpenedPath?: string }
++        ).__proxySettingsOpenedPath = filePath;
++        return "";
++      };
++    });
++    await section.getByRole("button", { name: "Open Pi settings" }).click();
++    await expect(section.getByRole("alert")).toHaveCount(0);
++    await expect
++      .poll(() =>
++        explicit.harness.electronApp.evaluate(
++          () =>
++            (globalThis as typeof globalThis & { __proxySettingsOpenedPath?: string })
++              .__proxySettingsOpenedPath,
++        ),
++      )
++      .toBe(explicit.settingsPath);
++  } finally {
++    await explicit.harness.close();
++  }
++
++  const environment = await showGeneralForSnapshot({
++    name: "proxy-status-environment",
++    settings: {},
++    envOverrides: {
++      HTTP_PROXY: "http://env-user:env-password@env-proxy.example:8080",
++      HTTPS_PROXY: "https://env-secure-user:env-secure-password@env-proxy.example:8443",
++      NO_PROXY: "internal.example",
++      http_proxy: undefined,
++      https_proxy: undefined,
++      no_proxy: undefined,
++    },
++  });
++  try {
++    await expect(environment.section).toContainText("Environment variables");
++    await expect(environment.section).toContainText("http://env-proxy.example:8080");
++    await expect(environment.section).toContainText("https://env-proxy.example:8443");
++    await expect(environment.section).toContainText("internal.example");
++    await expect(environment.section).not.toContainText("env-password");
++  } finally {
++    await environment.harness.close();
++  }
++
++  const direct = await showGeneralForSnapshot({
++    name: "proxy-status-direct",
++    settings: {},
++    envOverrides: {
++      HTTP_PROXY: undefined,
++      HTTPS_PROXY: undefined,
++      http_proxy: undefined,
++      https_proxy: undefined,
++      NO_PROXY: "",
++      no_proxy: undefined,
++    },
++  });
++  try {
++    await expect(direct.section).toContainText("Direct connection");
++    await expect(direct.section.getByText("Not set")).toBeVisible();
++  } finally {
++    await direct.harness.close();
++  }
++});
++
++async function showGeneralForSnapshot(input: {
++  readonly name: string;
++  readonly settings: Record<string, unknown>;
++  readonly envOverrides: Record<string, string | undefined>;
++}) {
++  const userDataDir = await makeUserDataDir();
++  const agentDir = join(userDataDir, "agent");
++  const settingsPath = join(agentDir, "settings.json");
++  const workspacePath = await makeWorkspace(input.name);
++  await seedAgentDir(agentDir, { enabledModels: [] });
++  await writeFile(settingsPath, `${JSON.stringify(input.settings, null, 2)}\n`, "utf8");
++  const launchOptions = {
++    agentDir,
++    initialWorkspaces: [workspacePath],
++    scrubProviderEnv: true,
++    testMode: "foreground",
++    envOverrides: input.envOverrides,
++  } as const;
++  const harness = PACKAGED
++    ? await launchDesktopByExecutable(PACKAGED_EXECUTABLE, userDataDir, launchOptions)
++    : await launchDesktop(userDataDir, launchOptions);
++  const identity = await harness.electronApp.evaluate(({ app }) => ({
++    appPath: app.getAppPath(),
++    isPackaged: app.isPackaged,
++  }));
++  const window = await harness.firstWindow();
++  await waitForWorkspaceByPath(window, workspacePath);
++  await window.keyboard.press(desktopShortcut(","));
++  await expect(window.getByTestId("settings-surface")).toBeVisible();
++  await window.getByRole("button", { name: "General", exact: true }).click();
++  const section = window.locator(".settings-section", {
++    has: window.locator(".settings-section__title", { hasText: "Pi and proxy" }),
++  });
++  await expect(section.getByRole("button", { name: "Refresh status" })).toBeVisible();
++  return { harness, section, settingsPath, window, identity };
++}
+diff --git a/apps/desktop/tests/core/proxy-support.spec.ts b/apps/desktop/tests/core/proxy-support.spec.ts
+new file mode 100644
+index 0000000..5c4a3ca
+--- /dev/null
++++ b/apps/desktop/tests/core/proxy-support.spec.ts
+@@ -0,0 +1,65 @@
++import { createServer } from "node:http";
++import { writeFile } from "node:fs/promises";
++import { join } from "node:path";
++import { expect, test } from "@playwright/test";
++import {
++  desktopShortcut,
++  launchDesktop,
++  makeUserDataDir,
++  makeWorkspace,
++  seedAgentDir,
++} from "../helpers/electron-app";
++import { listenLoopback, startLocalConnectProxy } from "../helpers/proxy-fixture";
++
++test("custom endpoint Detect models reaches its local HTTP server through the configured proxy", async () => {
++  const origin = createServer((_request, response) => {
++    response.writeHead(200, { "content-type": "application/json" });
++    response.end(JSON.stringify({ data: [{ id: "proxy-detected-model" }] }));
++  });
++  const baseUrl = `${await listenLoopback(origin)}/v1`;
++  const proxy = await startLocalConnectProxy();
++  const userDataDir = await makeUserDataDir();
++  const agentDir = join(userDataDir, "agent");
++  const workspacePath = await makeWorkspace("proxy-model-detection-workspace");
++  await seedAgentDir(agentDir, { enabledModels: [] });
++  await writeFile(
++    join(agentDir, "settings.json"),
++    `${JSON.stringify({ httpProxy: proxy.url }, null, 2)}\n`,
++    "utf8",
++  );
++  const harness = await launchDesktop(userDataDir, {
++    agentDir,
++    initialWorkspaces: [workspacePath],
++    scrubProviderEnv: true,
++    testMode: "background",
++    envOverrides: {
++      HTTP_PROXY: undefined,
++      HTTPS_PROXY: undefined,
++      NO_PROXY: "",
++      no_proxy: "",
++    },
++  });
++  try {
++    const window = await harness.firstWindow();
++    await window.keyboard.press(desktopShortcut(","));
++    await expect(window.getByTestId("settings-surface")).toBeVisible();
++    await window.getByRole("button", { name: "Providers", exact: true }).click();
++    const customEndpoints = window.locator(".settings-section", {
++      has: window.locator(".settings-section__title", { hasText: "Custom endpoints" }),
++    });
++    await customEndpoints.getByRole("button", { name: "Add endpoint", exact: true }).click();
++    const dialog = window.getByTestId("custom-endpoint-dialog");
++    await dialog.getByLabel("Provider ID").fill("proxy-test");
++    await dialog.getByLabel("Base URL").fill(baseUrl);
++    await dialog.getByLabel("API key").fill("fixture-key");
++    await dialog.getByRole("button", { name: "Detect models", exact: true }).click();
++    await expect(dialog.locator(".custom-endpoint-model-list")).toContainText(
++      "proxy-detected-model",
++    );
++    expect(proxy.tunnels()).toBeGreaterThan(0);
++  } finally {
++    await harness.close();
++    await proxy.close();
++    await new Promise<void>((resolve) => origin.close(() => resolve()));
++  }
++});
+diff --git a/apps/desktop/tests/core/settings-appearance.spec.ts b/apps/desktop/tests/core/settings-appearance.spec.ts
+index db7d515..4a46005 100644
+--- a/apps/desktop/tests/core/settings-appearance.spec.ts
++++ b/apps/desktop/tests/core/settings-appearance.spec.ts
+@@ -131,41 +131,43 @@ test("selects and restores theme presets", async () => {
+   }
+ });
+ 
+-test("every preset recolours the same design instead of restyling it", async () => {
+-  const userDataDir = await makeUserDataDir();
+-  const workspacePath = await makeWorkspace("appearance-one-design");
+-  const harness = await launchDesktop(userDataDir, {
+-    initialWorkspaces: [workspacePath],
+-    testMode: "background",
+-  });
++test.describe("every preset recolours the same design instead of restyling it", () => {
++  for (const variant of ["light", "dark"] as const) {
++    for (const preset of themePresets) {
++      test(`${preset.name} in ${variant} recolours the same surfaces`, async () => {
++        const userDataDir = await makeUserDataDir();
++        const workspacePath = await makeWorkspace(`appearance-${preset.id}-${variant}`);
++        const harness = await launchDesktop(userDataDir, {
++          initialWorkspaces: [workspacePath],
++          testMode: "background",
++        });
+ 
+-  try {
+-    const window = await harness.firstWindow();
+-    await waitForWorkspaceByPath(window, workspacePath);
+-    await createNamedThread(window, "Preset assertion thread");
+-    await seedTranscriptMessages(harness, window, {
+-      count: 1,
+-      textFactory: () =>
+-        'Preset assertion surface with `inline code`.\n\n```ts\nconst surface = "workbench";\n```',
+-    });
+-    await expect(window.getByTestId("transcript")).toContainText("inline code");
+-
+-    for (const variant of ["light", "dark"] as const) {
+-      for (const preset of themePresets) {
+-        await openAppearance(window);
+-        await window
+-          .getByRole("radio", { name: variant === "light" ? "Light" : "Dark", exact: true })
+-          .click();
+-        await selectThemePreset(window, preset.name);
+-        await expect(window.getByLabel("Color preset")).toHaveValue(preset.id);
+-        await expectDerivedTokens(window, preset.id, variant);
+-        await window.getByRole("button", { name: "Back to app" }).click();
+-        await expect(window.locator(".main")).toBeVisible();
+-        await expectSameDesign(window);
+-      }
++        try {
++          const window = await harness.firstWindow();
++          await waitForWorkspaceByPath(window, workspacePath);
++          await createNamedThread(window, "Preset assertion thread");
++          await seedTranscriptMessages(harness, window, {
++            count: 1,
++            textFactory: () =>
++              'Preset assertion surface with `inline code`.\n\n```ts\nconst surface = "workbench";\n```',
++          });
++          await expect(window.getByTestId("transcript")).toContainText("inline code");
++
++          await openAppearance(window);
++          await window
++            .getByRole("radio", { name: variant === "light" ? "Light" : "Dark", exact: true })
++            .click();
++          await selectThemePreset(window, preset.name);
++          await expect(window.getByLabel("Color preset")).toHaveValue(preset.id);
++          await expectDerivedTokens(window, preset.id, variant);
++          await window.getByRole("button", { name: "Back to app" }).click();
++          await expect(window.locator(".main")).toBeVisible();
++          await expectSameDesign(window);
++        } finally {
++          await harness.close();
++        }
++      });
+     }
+-  } finally {
+-    await harness.close();
+   }
+ });
+ 
+diff --git a/apps/desktop/tests/fixtures/proxy/localhost-cert.pem b/apps/desktop/tests/fixtures/proxy/localhost-cert.pem
+new file mode 100644
+index 0000000..53064a2
+--- /dev/null
++++ b/apps/desktop/tests/fixtures/proxy/localhost-cert.pem
+@@ -0,0 +1,18 @@
++-----BEGIN CERTIFICATE-----
++MIIC7DCCAdSgAwIBAgIIIpNM+SEdPG0wDQYJKoZIhvcNAQELBQAwFDESMBAGA1UE
++AxMJbG9jYWxob3N0MB4XDTI2MDkyNDA1MDUzNVoXDTMxMDkyNTA1MDUzNVowFDES
++MBAGA1UEAxMJbG9jYWxob3N0MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKC
++AQEA5DT1NRPlgwcop1iCJycmZrLkEMHnM3+LIIHedFy9pDg8er4lDC9uThG1QCaq
++cBDAttpsfSPwnZ21II3zZFK9nI1zlb+sIhGyNChjpHc1tUWR039yhRKmwyv+VDzy
++de8UnQyqifPEzL6We3N3tNGDKb4lmiQVffbc4W31atx1mg5znrYXuZJTdR5kBggo
++TE+1V4a67q58qbrEDqawMElN1iI9xp0yigfcPBNi8BvMMSrmLGbF0ElDBvfCEQVp
++Qpy7/PK4QdoZ/6XEx3x3Z55qGHNlOz8yjTJdbIhK11kg1iPGZTeMpPeF4vpN/eHA
++o+jDEzxG2F2/rvxUm+y+lJYltQIDAQABo0IwQDAaBgNVHREEEzARgglsb2NhbGhv
++c3SHBH8AAAEwEgYDVR0TAQH/BAgwBgEB/wIBATAOBgNVHQ8BAf8EBAMCAqQwDQYJ
++KoZIhvcNAQELBQADggEBANvHKlOkNpmmOKncei3mrVW8BPohYK7yaKZnggo8IxQm
++XL45fhKvyfNsHUHhi4jBHrIX6O+VFTjrQO7RdPax30ZszWETHKu/JnXvdp9Sw15M
++nHHGbFLwB3IfTJf1iMfpJPEuuAolrZWNIJjJW+3D6g72tl+3FIWSwIzjOTuh+XdQ
++wnDjZTNrkbTGfONJfklUqbjKNDs8GMgiUzyesJCan+9si+JTBABcJQaJ0nUs2NDW
++EIH7VenyCaBG8g4EssjX/OyTR+JY2DPuhdfRQpZ0YvSEqDy3CcOUJngOWtY8EdwC
++ngZ62rPJVyjgr9svmh19yooKZ3R5iDeJOeBTWy0PUl4=
++-----END CERTIFICATE-----
+\ No newline at end of file
+diff --git a/apps/desktop/tests/fixtures/proxy/localhost-key.pem b/apps/desktop/tests/fixtures/proxy/localhost-key.pem
+new file mode 100644
+index 0000000..122fbb9
+--- /dev/null
++++ b/apps/desktop/tests/fixtures/proxy/localhost-key.pem
+@@ -0,0 +1,28 @@
++-----BEGIN PRIVATE KEY-----
++MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQDkNPU1E+WDByin
++WIInJyZmsuQQweczf4sggd50XL2kODx6viUML25OEbVAJqpwEMC22mx9I/CdnbUg
++jfNkUr2cjXOVv6wiEbI0KGOkdzW1RZHTf3KFEqbDK/5UPPJ17xSdDKqJ88TMvpZ7
++c3e00YMpviWaJBV99tzhbfVq3HWaDnOethe5klN1HmQGCChMT7VXhrrurnypusQO
++prAwSU3WIj3GnTKKB9w8E2LwG8wxKuYsZsXQSUMG98IRBWlCnLv88rhB2hn/pcTH
++fHdnnmoYc2U7PzKNMl1siErXWSDWI8ZlN4yk94Xi+k394cCj6MMTPEbYXb+u/FSb
++7L6UliW1AgMBAAECggEBAKZ1apc42CTnR+QpT2a3y+8Fdg4zIi4STq17jYRbUYlD
++6/msUOG+hzsy936/tXrg/XFjidcOLCkMLF5+rJb1M5HKLBGDKk//kHkzLNt+iRKc
++mG4pfKNMo4+hu3Y+rq0Po32bC5ps0ZR3QNTzuNGQMZh1NoBk6bhkJWHaDzXPcYjY
++uLoJbdbgYPTxv2rWwfwo9CJexfcHoeJHCRDKteqCwJcg9zAhTOTxvawn/uY0N60V
++oz9o7QAzK+/8TGTjDU2ppUhUow9MZwSmsebO08Zcml/gUoG7+ZtDX4IzuZcjztBZ
++YBZYOTLdOKawIIH1xnwQMqM9niMhSrixJpvmywj2P1ECgYEA5gnjleCEgrzlOGN+
++S/P1UdJEvnTjLae9SxVTQ+8k848KEAic9c+SvqXJMw+joA28DA94JYbHnYgjo+oX
++k6a3zZX860nDfBfShukq94NqZDwDKqw98aMRnjqJwPUA+gpdIQdYay1JiLJ38VYC
++r8xJC8has2y+yFT/44qxTpUVyosCgYEA/fYlmWM/xP7P0i2ypDp6DBAieXTb3Ky6
++/GQ3hLtdkopDAgQ3OAvtl/Q2CPx+GI2F8R0EUrzgwQwN/qg6W/TWzJbutrEaSe4t
++jzzuHVlv7tTG13n01UH4KThGUiHDi4QJZA5gmbqQWGDaECEkycIaYOJNreR67S/7
++CBmJM2DlGL8CgYBJxj4g4QJeU2pH7VCh1zmD5iV5107MY5FHtS0hCl8VZXhasAh2
++pP1w+wZNw+Q7/muiiouDrXfzQ6f6d6bcCYnE+ydD5kI1WAaCkeDfxFuojb6OPvMW
++va92yVtIcMrBZfV8FDj9FmcQ2fuxgF4YNzHt/3FnPabp5Ki0NtSqWRHGBQKBgQDH
++xbYD+Ae0zgDqw5nQCFPzY0nLIvrEl3erjKYDmmPcHzjgwDIzu2ZV7vwGi6Ahbkpb
++xcid0Qg3s2Ta2ri1l17UpzH2slAMsfhSwcpJeg5L4ELeQ4gtrWwp+KOQfhDVkbLV
++a13f79sWOnGu2HOY5kBb0Ajs7lsoc2LUF0pPCTyN/wKBgHyJZw8IfCzFiSDIWL74
++GwuhZxdLtjRn9PSndnfBTYKZtmgpMhTYHs6SQiY5wpjQnaLNI9XOTD6U0fsEsa49
++puQs0ion4JQtwqihw1X3PINSDPrSN9qNbhQ+BlNEIh4xvk2vGYfIBF4RtmWOyToP
++g26fC2ChxZTegAWY+KZMzYDk
++-----END PRIVATE KEY-----
+\ No newline at end of file
+diff --git a/apps/desktop/tests/helpers/proxy-fixture.ts b/apps/desktop/tests/helpers/proxy-fixture.ts
+new file mode 100644
+index 0000000..738701e
+--- /dev/null
++++ b/apps/desktop/tests/helpers/proxy-fixture.ts
+@@ -0,0 +1,89 @@
++import { createServer, type Server } from "node:http";
++import { connect, type AddressInfo, type Server as NetServer, type Socket } from "node:net";
++import { execFile } from "node:child_process";
++import { promisify } from "node:util";
++
++const execFileAsync = promisify(execFile);
++
++export async function runNodeWithTrustedTestCertificate(
++  helperPath: string,
++  args: readonly string[],
++  certificatePath: string,
++): Promise<{ readonly stdout: string; readonly stderr: string }> {
++  return execFileAsync(process.execPath, [helperPath, ...args], {
++    cwd: process.cwd(),
++    env: { ...process.env, NODE_EXTRA_CA_CERTS: certificatePath },
++    timeout: 15_000,
++    windowsHide: true,
++  });
++}
++
++export interface LocalConnectProxy {
++  readonly url: string;
++  readonly tunnels: () => number;
++  close(): Promise<void>;
++}
++
++/** A real loopback HTTP forward proxy that establishes CONNECT tunnels. */
++export async function startLocalConnectProxy(): Promise<LocalConnectProxy> {
++  let tunnelCount = 0;
++  const sockets = new Set<Socket>();
++  const proxy: Server = createServer((_request, response) => {
++    response.writeHead(501);
++    response.end("Only CONNECT is supported by this fixture");
++  });
++  proxy.on("connection", (socket) => {
++    sockets.add(socket);
++    socket.once("close", () => sockets.delete(socket));
++  });
++  proxy.on("connect", (request, client, head) => {
++    const separator = request.url?.lastIndexOf(":") ?? -1;
++    const hostname = request.url?.slice(0, separator);
++    const port = Number(request.url?.slice(separator + 1));
++    if (!hostname || !Number.isInteger(port) || port < 1 || port > 65535) {
++      client.end("HTTP/1.1 400 Bad Request\r\n\r\n");
++      return;
++    }
++    const upstream = connect(port, hostname);
++    sockets.add(upstream);
++    upstream.once("close", () => sockets.delete(upstream));
++    upstream.once("connect", () => {
++      tunnelCount += 1;
++      client.write("HTTP/1.1 200 Connection Established\r\n\r\n");
++      if (head.length) upstream.write(head);
++      client.pipe(upstream);
++      upstream.pipe(client);
++    });
++    upstream.once("error", () => client.destroy());
++  });
++  await new Promise<void>((resolve, reject) => {
++    proxy.once("error", reject);
++    proxy.listen(0, "127.0.0.1", () => {
++      proxy.off("error", reject);
++      resolve();
++    });
++  });
++  const address = proxy.address() as AddressInfo;
++  return {
++    url: `http://127.0.0.1:${address.port}`,
++    tunnels: () => tunnelCount,
++    close: async () => {
++      for (const socket of sockets) socket.destroy();
++      await new Promise<void>((resolve, reject) => {
++        proxy.close((error) => (error ? reject(error) : resolve()));
++      });
++    },
++  };
++}
++
++export async function listenLoopback(server: NetServer): Promise<string> {
++  await new Promise<void>((resolve, reject) => {
++    server.once("error", reject);
++    server.listen(0, "127.0.0.1", () => {
++      server.off("error", reject);
++      resolve();
++    });
++  });
++  const address = server.address() as AddressInfo;
++  return `http://127.0.0.1:${address.port}`;
++}
+diff --git a/apps/desktop/tests/helpers/proxy-tls-child.mjs b/apps/desktop/tests/helpers/proxy-tls-child.mjs
+new file mode 100644
+index 0000000..77fa653
+--- /dev/null
++++ b/apps/desktop/tests/helpers/proxy-tls-child.mjs
+@@ -0,0 +1,57 @@
++import { mkdtemp, rm, writeFile } from "node:fs/promises";
++import { tmpdir } from "node:os";
++import path from "node:path";
++import { createJiti } from "jiti";
++
++const [httpProxy, httpsProxy, plainUrl, secureUrl, websocketUrl] = process.argv.slice(2);
++if (!httpProxy || !httpsProxy || !plainUrl || !secureUrl || !websocketUrl) {
++  throw new Error("The proxy TLS child requires both proxies and all three local URLs.");
++}
++
++const source = path.resolve("apps/desktop/electron/network/desktop-proxy.ts");
++const jiti = createJiti(source);
++const { createDesktopProxyDispatcher, initializeDesktopProxy } = await jiti.import(source);
++const { fetch } = await import("undici");
++
++const dispatcher = createDesktopProxyDispatcher(
++  {},
++  { HTTP_PROXY: httpProxy, HTTPS_PROXY: httpsProxy, NO_PROXY: "" },
++);
++try {
++  const plainResponse = await fetch(plainUrl, { dispatcher });
++  if ((await plainResponse.text()) !== "http-through-proxy") {
++    throw new Error("HTTP fixture response mismatch.");
++  }
++  const secureResponse = await fetch(secureUrl, { dispatcher });
++  if ((await secureResponse.text()) !== "tls-through-proxy") {
++    throw new Error("HTTPS fixture response mismatch.");
++  }
++} finally {
++  await dispatcher.close();
++}
++
++const agentDir = await mkdtemp(path.join(tmpdir(), "pi-gui-proxy-wss-"));
++try {
++  await writeFile(path.join(agentDir, "settings.json"), JSON.stringify({ httpProxy: httpsProxy }));
++  const installed = await initializeDesktopProxy({ agentDir, env: { NO_PROXY: "" } });
++  try {
++    const socket = new WebSocket(websocketUrl);
++    const closed = new Promise((resolve) =>
++      socket.addEventListener("close", resolve, { once: true }),
++    );
++    const message = await new Promise((resolve, reject) => {
++      socket.addEventListener("message", (event) => resolve(String(event.data)), { once: true });
++      socket.addEventListener("error", () => reject(new Error("WSS fixture connection failed.")), {
++        once: true,
++      });
++    });
++    if (message !== "ok") throw new Error("WSS fixture message mismatch.");
++    await closed;
++  } finally {
++    await installed.destroy();
++  }
++} finally {
++  await rm(agentDir, { recursive: true, force: true });
++}
++
++process.stdout.write("HTTP, HTTPS, and WSS proxy fixtures passed\n");
+diff --git a/apps/desktop/tests/live/proxy-live.spec.ts b/apps/desktop/tests/live/proxy-live.spec.ts
+new file mode 100644
+index 0000000..c061963
+--- /dev/null
++++ b/apps/desktop/tests/live/proxy-live.spec.ts
+@@ -0,0 +1,601 @@
++import { createServer, connect, type Socket } from "node:net";
++import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
++import { tmpdir } from "node:os";
++import { join, resolve } from "node:path";
++import { expect, test, type Page } from "@playwright/test";
++import {
++  launchDesktop,
++  launchDesktopByExecutable,
++  type DesktopHarness,
++} from "../helpers/electron-app";
++
++type TunnelRecord = {
++  target: string;
++  status: number;
++  clientBytes: number;
++  proxyBytes: number;
++};
++
++type ProxyRelay = {
++  readonly url: string;
++  readonly records: TunnelRecord[];
++  close(): Promise<void>;
++};
++
++type NetworkEvidence = {
++  webSocket: {
++    constructed: number;
++    opened: number;
++    messages: number;
++    sent: number;
++    closed: number;
++    forcedFailures: number;
++  };
++  fetch: {
++    count: number;
++    sseFrameCount: number;
++    responses: Array<{ status: number; contentType: string; sseFrames: number }>;
++  };
++};
++
++const REAL_AUTH_ENABLED = process.env.PI_APP_REAL_AUTH === "1";
++const AUTH_SOURCE_DIR = process.env.PI_APP_REAL_AUTH_SOURCE_DIR?.trim();
++const PROVIDER = process.env.PI_GUI_PROVIDER?.trim() || "openai-codex";
++const MODEL = process.env.PI_GUI_MODEL?.trim() || "gpt-6-luna";
++const PACKAGED = process.env.PI_PROXY_PACKAGED === "1";
++const SHELL_PATH = process.env.PI_PROXY_SHELL_PATH?.trim();
++const DESKTOP_DIR = resolve(__dirname, "../..");
++const REPO_ROOT = resolve(DESKTOP_DIR, "../..");
++
++test.describe("live proxy verification", () => {
++  test.describe.configure({ mode: "serial" });
++
++  test.beforeEach(({}, testInfo) => {
++    testInfo.setTimeout(300_000);
++    if (!REAL_AUTH_ENABLED || !AUTH_SOURCE_DIR) {
++      testInfo.skip(
++        !REAL_AUTH_ENABLED,
++        "Set PI_APP_REAL_AUTH=1 and PI_APP_REAL_AUTH_SOURCE_DIR to run real-provider proxy verification.",
++      );
++    }
++    if (!AUTH_SOURCE_DIR) {
++      throw new Error("PI_APP_REAL_AUTH=1 requires PI_APP_REAL_AUTH_SOURCE_DIR.");
++    }
++  });
++
++  test("real WebSocket conversation, follow-up and echo tool use go through the proxy", async () => {
++    await runProxyConversation({ forceWebSocketFailure: false });
++  });
++
++  test("a failed WebSocket construction falls back to real SSE through the proxy", async () => {
++    await runProxyConversation({ forceWebSocketFailure: true });
++  });
++});
++
++async function runProxyConversation(options: { forceWebSocketFailure: boolean }): Promise<void> {
++  const info = test.info();
++  const evidenceDir = info.outputPath();
++  await mkdir(evidenceDir, { recursive: true });
++
++  const privateRoot = await mkdtemp(join(tmpdir(), "pi-gui-proxy-private-"));
++  await chmod(privateRoot, 0o700);
++  const profile = join(privateRoot, "profile");
++  const agentDir = join(privateRoot, "agent");
++  const workspace = join(privateRoot, "workspace");
++  await mkdir(agentDir, { recursive: true, mode: 0o700 });
++  await mkdir(workspace, { recursive: true, mode: 0o700 });
++
++  const sourceDir = AUTH_SOURCE_DIR;
++  if (!sourceDir) throw new Error("Real provider auth source is unavailable.");
++  if (!SHELL_PATH) throw new Error("PI_PROXY_SHELL_PATH must point to a usable Bash executable.");
++  const sourceAuth = JSON.parse(await readFile(join(sourceDir, "auth.json"), "utf8")) as Record<
++    string,
++    unknown
++  >;
++  const selectedCredentials = sourceAuth[PROVIDER];
++  if (!selectedCredentials) {
++    throw new Error(`No saved credentials for selected provider ${PROVIDER}.`);
++  }
++  await writeFile(
++    join(agentDir, "auth.json"),
++    `${JSON.stringify({ [PROVIDER]: selectedCredentials })}\n`,
++    { mode: 0o600 },
++  );
++
++  const relay = await startConnectRelay();
++  await writeFile(
++    join(agentDir, "settings.json"),
++    `${JSON.stringify(
++      {
++        defaultProvider: PROVIDER,
++        defaultModel: MODEL,
++        defaultThinkingLevel: "off",
++        enabledModels: [`${PROVIDER}/${MODEL}`],
++        httpProxy: relay.url,
++        shellPath: SHELL_PATH,
++      },
++      null,
++      2,
++    )}\n`,
++    { mode: 0o600 },
++  );
++
++  let harness: DesktopHarness | undefined;
++  let traceStarted = false;
++  const evidence: NetworkEvidence = {
++    webSocket: {
++      constructed: 0,
++      opened: 0,
++      messages: 0,
++      sent: 0,
++      closed: 0,
++      forcedFailures: 0,
++    },
++    fetch: { count: 0, sseFrameCount: 0, responses: [] },
++  };
++  const assistantChecks = {
++    initialTurn: false,
++    followUpTurn: false,
++    echoToolOutput: false,
++  };
++
++  try {
++    harness = await launchApp(profile, {
++      agentDir,
++      initialWorkspaces: [workspace],
++      scrubProviderEnv: true,
++      envOverrides: {
++        PI_APP_TEST_MODE: undefined,
++        HTTP_PROXY: "",
++        HTTPS_PROXY: "",
++        NO_PROXY: "",
++        http_proxy: "",
++        https_proxy: "",
++        no_proxy: "",
++      },
++    });
++    await harness.focusWindow();
++    const page = await harness.firstWindow();
++    const identity = await captureDoctor(harness, page, profile, evidenceDir, PACKAGED);
++    const instrumentation = await installNetworkCounters(harness, options.forceWebSocketFailure);
++    expect(instrumentation).toEqual({
++      webSocketWrapped: true,
++      fetchWrapped: true,
++      forceWebSocketFailure: options.forceWebSocketFailure,
++    });
++    await harness.electronApp.context().tracing.start({
++      screenshots: true,
++      snapshots: true,
++      sources: true,
++    });
++    traceStarted = true;
++
++    await sendInitialTurn(page);
++    const assistant = page.locator(".timeline-item--assistant .message__content");
++    await expect(assistant.last()).toContainText("PI_PROXY_TURN_ONE_OK", { timeout: 180_000 });
++    await expect
++      .poll(() => latestAssistantText(page), { timeout: 180_000 })
++      .toContain("PI_PROXY_TURN_ONE_OK");
++    const firstTurnAssistant = (await assistant.allTextContents()).join("\n");
++    expect(firstTurnAssistant).toContain("PI_PROXY_TURN_ONE_OK");
++    assistantChecks.initialTurn = true;
++    await expect(page.getByTestId("send")).not.toHaveAttribute("aria-label", "Stop run", {
++      timeout: 120_000,
++    });
++    await page.screenshot({ path: join(evidenceDir, "turn-one.png") });
++
++    const composer = page.getByTestId("composer");
++    await composer.fill(
++      "Use your shell tool to run exactly `echo PI_PROXY_ECHO_OK > proxy-tool-proof.txt && cat proxy-tool-proof.txt`. Wait until the command succeeds and its output is PI_PROXY_ECHO_OK, then reply with exactly PI_PROXY_TURN_TWO_OK.",
++    );
++    await composer.press("Enter");
++    await expect(assistant.last()).toContainText("PI_PROXY_TURN_TWO_OK", { timeout: 180_000 });
++    const finalAssistantText = (await assistant.allTextContents()).join("\n");
++    expect(finalAssistantText).toContain("PI_PROXY_TURN_ONE_OK");
++    expect(finalAssistantText).toContain("PI_PROXY_TURN_TWO_OK");
++    assistantChecks.followUpTurn = true;
++    await expect
++      .poll(() => page.locator(".timeline-tool").count(), { timeout: 120_000 })
++      .toBeGreaterThan(0);
++    const toolItem = page.locator(".timeline-tool").first();
++    const toolHeader = toolItem.locator(".timeline-tool__header");
++    await expect(toolItem).not.toHaveClass(/timeline-tool--failed/);
++    await toolHeader.click();
++    await expect(toolHeader).toHaveAttribute("aria-expanded", "true");
++    await expect(toolItem.locator(".timeline-tool__body")).toBeVisible();
++    await expect(toolItem.locator(".timeline-tool__pre")).toContainText("PI_PROXY_ECHO_OK");
++    const toolProof = await readFile(join(workspace, "proxy-tool-proof.txt"), "utf8");
++    expect(toolProof.trim()).toBe("PI_PROXY_ECHO_OK");
++    assistantChecks.echoToolOutput = true;
++
++    const networkEvidence = await readNetworkCounters(harness);
++    Object.assign(evidence, networkEvidence);
++    expect(evidence.webSocket.constructed).toBeGreaterThan(0);
++    if (options.forceWebSocketFailure) {
++      expect(evidence.webSocket.forcedFailures).toBeGreaterThan(0);
++      expect(
++        evidence.fetch.responses.some(
++          (response) =>
++            response.status === 200 &&
++            (response.contentType.toLowerCase().includes("text/event-stream") ||
++              response.sseFrames > 0),
++        ),
++      ).toBe(true);
++      expect(evidence.fetch.sseFrameCount).toBeGreaterThan(0);
++    } else {
++      expect(evidence.webSocket.opened).toBeGreaterThan(0);
++      expect(evidence.webSocket.messages).toBeGreaterThan(0);
++      expect(evidence.webSocket.sent).toBeGreaterThan(0);
++    }
++    expect(
++      relay.records.some(({ target, status }) => status === 200 && isChatGptTarget(target)),
++    ).toBe(true);
++    await page.screenshot({ path: join(evidenceDir, "completed.png") });
++
++    await writeFile(
++      join(evidenceDir, "doctor.json"),
++      JSON.stringify({ ...identity, provider: PROVIDER, model: MODEL }, null, 2),
++    );
++  } finally {
++    if (harness) {
++      try {
++        if (traceStarted) {
++          await harness.electronApp
++            .context()
++            .tracing.stop({ path: join(evidenceDir, "proxy-conversation.zip") });
++        }
++      } finally {
++        await harness.close();
++      }
++    }
++    await writeFile(
++      join(evidenceDir, "proxy-evidence.json"),
++      JSON.stringify(
++        {
++          mode: options.forceWebSocketFailure ? "websocket-failure-sse-fallback" : "websocket",
++          network: evidence,
++          relay: {
++            connectCount: relay.records.length,
++            tunnels: relay.records.map(({ target, status, clientBytes, proxyBytes }) => ({
++              target,
++              status,
++              clientBytes,
++              proxyBytes,
++            })),
++          },
++          assistantChecks,
++        },
++        null,
++        2,
++      ),
++    );
++    await relay.close();
++  }
++}
++
++function launchApp(
++  userDataDir: string,
++  options: Parameters<typeof launchDesktop>[1],
++): Promise<DesktopHarness> {
++  if (PACKAGED) {
++    return launchDesktopByExecutable(
++      resolve(
++        REPO_ROOT,
++        process.env.PI_PROXY_EXECUTABLE || "apps/desktop/release/win-unpacked/pi-gui.exe",
++      ),
++      userDataDir,
++      options,
++    );
++  }
++  return launchDesktop(userDataDir, options);
++}
++
++async function captureDoctor(
++  harness: DesktopHarness,
++  page: Page,
++  profile: string,
++  evidenceDir: string,
++  packaged: boolean,
++): Promise<Record<string, unknown>> {
++  const identity = await harness.electronApp.evaluate(({ app, BrowserWindow }) => ({
++    pid: process.pid,
++    userData: app.getPath("userData"),
++    appPath: app.getAppPath(),
++    isPackaged: app.isPackaged,
++    testMode: process.env.PI_APP_TEST_MODE ?? null,
++    testHooks: "__PI_APP_TEST_HOOKS" in globalThis,
++    visible: BrowserWindow.getAllWindows()[0]?.isVisible() ?? false,
++    focused: BrowserWindow.getAllWindows()[0]?.isFocused() ?? false,
++  }));
++  const documentFocused = await page.evaluate(() => document.hasFocus());
++  const doctor = { ...identity, documentFocused };
++  await writeFile(join(evidenceDir, "doctor.json"), JSON.stringify(doctor, null, 2));
++  expect(identity).toMatchObject({
++    isPackaged: packaged,
++    testMode: null,
++    testHooks: false,
++    visible: true,
++  });
++  expect(identity.focused || documentFocused).toBe(true);
++  expect(resolve(identity.userData)).toBe(resolve(profile));
++  if (!packaged) expect(resolve(identity.appPath)).toBe(DESKTOP_DIR);
++  return doctor;
++}
++
++async function installNetworkCounters(
++  harness: DesktopHarness,
++  forceWebSocketFailure: boolean,
++): Promise<{
++  webSocketWrapped: boolean;
++  fetchWrapped: boolean;
++  forceWebSocketFailure: boolean;
++}> {
++  return harness.electronApp.evaluate(
++    (_, { forceFailure }) => {
++      const state = {
++        webSocket: {
++          constructed: 0,
++          opened: 0,
++          messages: 0,
++          sent: 0,
++          closed: 0,
++          forcedFailures: 0,
++        },
++        fetch: {
++          count: 0,
++          sseFrameCount: 0,
++          responses: [] as Array<{
++            status: number;
++            contentType: string;
++            sseFrames: number;
++          }>,
++        },
++      };
++      const pendingScans: Promise<void>[] = [];
++      Object.defineProperty(globalThis, "__piProxyPendingSseScans", {
++        configurable: false,
++        enumerable: false,
++        value: pendingScans,
++      });
++      Object.defineProperty(globalThis, "__piProxyNetworkEvidence", {
++        configurable: false,
++        enumerable: false,
++        value: state,
++      });
++
++      const NativeWebSocket = globalThis.WebSocket;
++      class ObservedWebSocket extends NativeWebSocket {
++        constructor(url: string | URL, protocols?: string | string[]) {
++          state.webSocket.constructed += 1;
++          if (forceFailure) {
++            state.webSocket.forcedFailures += 1;
++            throw new Error("Intentional WebSocket failure for SSE fallback verification");
++          }
++          if (protocols === undefined) super(url);
++          else super(url, protocols);
++          this.addEventListener("open", () => state.webSocket.opened++);
++          this.addEventListener("message", () => state.webSocket.messages++);
++          this.addEventListener("close", () => state.webSocket.closed++);
++        }
++
++        override send(...args: Parameters<WebSocket["send"]>): void {
++          state.webSocket.sent += 1;
++          super.send(...args);
++        }
++      }
++      Object.defineProperty(globalThis, "WebSocket", {
++        configurable: true,
++        writable: true,
++        value: ObservedWebSocket,
++      });
++
++      const countOneSseFrame = async (response: Response): Promise<number> => {
++        const reader = response.body?.getReader();
++        if (!reader) return 0;
++        const decoder = new TextDecoder();
++        let scannedCharacters = 0;
++        let lineLength = 0;
++        let linePrefix = "";
++        let hasDataField = false;
++        try {
++          while (scannedCharacters < 65_536) {
++            const { done, value } = await reader.read();
++            const chunk = decoder.decode(value, { stream: !done });
++            for (const character of chunk) {
++              scannedCharacters += 1;
++              if (character === "\r") continue;
++              if (character === "\n") {
++                if (lineLength === 0) {
++                  if (hasDataField) return 1;
++                  hasDataField = false;
++                } else if (linePrefix === "data:") {
++                  hasDataField = true;
++                }
++                lineLength = 0;
++                linePrefix = "";
++              } else {
++                if (lineLength < 5) linePrefix += character;
++                lineLength += 1;
++              }
++              if (scannedCharacters >= 65_536) break;
++            }
++            if (done) return hasDataField || linePrefix === "data:" ? 1 : 0;
++          }
++          return 0;
++        } finally {
++          void reader.cancel().catch(() => {});
++        }
++      };
++
++      const nativeFetch = globalThis.fetch;
++      globalThis.fetch = async (input, init) => {
++        state.fetch.count += 1;
++        const response = await nativeFetch(input, init);
++        const responseEvidence = {
++          status: response.status,
++          contentType: response.headers.get("content-type") ?? "",
++          sseFrames: 0,
++        };
++        state.fetch.responses.push(responseEvidence);
++        const scan = countOneSseFrame(response.clone())
++          .then((count) => {
++            responseEvidence.sseFrames = count;
++            state.fetch.sseFrameCount += count;
++          })
++          .catch(() => {});
++        pendingScans.push(scan);
++        return response;
++      };
++      return {
++        webSocketWrapped: globalThis.WebSocket === ObservedWebSocket,
++        fetchWrapped: globalThis.fetch !== nativeFetch,
++        forceWebSocketFailure: forceFailure,
++      };
++    },
++    { forceFailure: forceWebSocketFailure },
++  );
++}
++
++async function readNetworkCounters(harness: DesktopHarness): Promise<NetworkEvidence> {
++  return harness.electronApp.evaluate(() => {
++    const state = (
++      globalThis as typeof globalThis & {
++        __piProxyNetworkEvidence: NetworkEvidence;
++      }
++    ).__piProxyNetworkEvidence;
++    const pendingScans = (
++      globalThis as typeof globalThis & { __piProxyPendingSseScans: Promise<void>[] }
++    ).__piProxyPendingSseScans;
++    return Promise.all(pendingScans).then(
++      () => JSON.parse(JSON.stringify(state)) as NetworkEvidence,
++    );
++  });
++}
++
++async function sendInitialTurn(page: Page): Promise<void> {
++  await page
++    .getByRole("complementary")
++    .getByRole("button", { name: "New thread", exact: true })
++    .click();
++  await page
++    .getByLabel("New thread prompt", { exact: true })
++    .fill("Do not use tools. Reply with exactly PI_PROXY_TURN_ONE_OK.");
++  await page.getByRole("button", { name: "Start thread", exact: true }).click();
++}
++
++async function latestAssistantText(page: Page): Promise<string> {
++  return (
++    (await page.locator(".timeline-item--assistant .message__content").last().textContent()) ?? ""
++  );
++}
++
++function isChatGptTarget(target: string): boolean {
++  const hostname = target.slice(0, target.lastIndexOf(":")).toLowerCase();
++  return hostname === "chatgpt.com" || hostname.endsWith(".chatgpt.com");
++}
++
++async function startConnectRelay(): Promise<ProxyRelay> {
++  const records: TunnelRecord[] = [];
++  const server = createServer((client) => {
++    let requestHeader = Buffer.alloc(0);
++    let upstream: Socket | undefined;
++    let connected = false;
++    let current: TunnelRecord | undefined;
++
++    const fail = () => {
++      client.destroy();
++      upstream?.destroy();
++    };
++    client.on("error", fail);
++    client.on("data", (chunk: Buffer) => {
++      if (connected && upstream && current) {
++        current.clientBytes += chunk.length;
++        upstream.write(chunk);
++        return;
++      }
++      requestHeader = Buffer.concat([requestHeader, chunk]);
++      const end = requestHeader.indexOf("\r\n\r\n");
++      if (end < 0) return;
++      const header = requestHeader.subarray(0, end).toString("latin1");
++      const match = /^CONNECT ([^\s]+) HTTP\/1\.[01]$/im.exec(header);
++      const target = match?.[1];
++      if (!target || !/^[-.\w\[\]:]+$/.test(target)) {
++        fail();
++        return;
++      }
++      const separator = target.lastIndexOf(":");
++      const hostname = target.startsWith("[")
++        ? target.slice(1, target.indexOf("]"))
++        : target.slice(0, separator);
++      const port = Number(target.slice(separator + 1));
++      if (!hostname || !Number.isInteger(port) || port < 1 || port > 65535) {
++        fail();
++        return;
++      }
++
++      upstream = connect({ host: "127.0.0.1", port: 7897 });
++      upstream.on("error", fail);
++      let proxyHeader = Buffer.alloc(0);
++      upstream.on("connect", () => {
++        upstream!.write(
++          `CONNECT ${target} HTTP/1.1\r\nHost: ${target}\r\nProxy-Connection: Keep-Alive\r\n\r\n`,
++        );
++      });
++      upstream.on("data", (proxyChunk: Buffer) => {
++        if (!connected) {
++          proxyHeader = Buffer.concat([proxyHeader, proxyChunk]);
++          const proxyEnd = proxyHeader.indexOf("\r\n\r\n");
++          if (proxyEnd < 0) return;
++          const responseHeader = proxyHeader.subarray(0, proxyEnd).toString("latin1");
++          const status = /^HTTP\/1\.[01] (\d{3})/i.exec(responseHeader)?.[1];
++          current = {
++            target: `${hostname}:${port}`,
++            status: Number(status ?? 0),
++            clientBytes: 0,
++            proxyBytes: 0,
++          };
++          records.push(current);
++          client.write(proxyHeader.subarray(0, proxyEnd + 4));
++          const initialPayload = proxyHeader.subarray(proxyEnd + 4);
++          if (initialPayload.length) {
++            current.proxyBytes += initialPayload.length;
++            client.write(initialPayload);
++          }
++          if (current.status !== 200) {
++            fail();
++            return;
++          }
++          connected = true;
++          const initialClientPayload = requestHeader.subarray(end + 4);
++          if (initialClientPayload.length) {
++            current.clientBytes += initialClientPayload.length;
++            upstream!.write(initialClientPayload);
++          }
++          return;
++        }
++        if (current) current.proxyBytes += proxyChunk.length;
++        client.write(proxyChunk);
++      });
++      client.removeAllListeners("data");
++      client.on("data", (data: Buffer) => {
++        if (!connected || !upstream || !current) return;
++        current.clientBytes += data.length;
++        upstream.write(data);
++      });
++      upstream.on("close", () => client.destroy());
++    });
++    client.on("close", () => upstream?.destroy());
++  });
++
++  await new Promise<void>((resolveListen, reject) => {
++    server.once("error", reject);
++    server.listen(0, "127.0.0.1", () => resolveListen());
++  });
++  const address = server.address();
++  if (!address || typeof address === "string") throw new Error("Could not start proxy relay.");
++  return {
++    url: `http://127.0.0.1:${address.port}`,
++    records,
++    close: () => new Promise<void>((resolveClose) => server.close(() => resolveClose())),
++  };
++}
+diff --git a/apps/desktop/tests/unit/desktop-proxy.spec.ts b/apps/desktop/tests/unit/desktop-proxy.spec.ts
+new file mode 100644
+index 0000000..6fea5f2
+--- /dev/null
++++ b/apps/desktop/tests/unit/desktop-proxy.spec.ts
+@@ -0,0 +1,373 @@
++import { createHash } from "node:crypto";
++import { mkdtemp, readFile, writeFile } from "node:fs/promises";
++import { join, resolve } from "node:path";
++import { tmpdir } from "node:os";
++import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
++import { createServer as createHttpsServer } from "node:https";
++import { expect, test } from "@playwright/test";
++import { createJiti } from "jiti";
++import { fetch as undiciFetch, getGlobalDispatcher, setGlobalDispatcher } from "undici";
++import {
++  listenLoopback,
++  runNodeWithTrustedTestCertificate,
++  startLocalConnectProxy,
++} from "../helpers/proxy-fixture";
++
++const testCertificateDirectory = join(__dirname, "../fixtures/proxy");
++
++const jiti = createJiti(__filename);
++let createDesktopProxyDispatcher: typeof import("../../electron/network/desktop-proxy").createDesktopProxyDispatcher;
++let initializeDesktopProxy: typeof import("../../electron/network/desktop-proxy").initializeDesktopProxy;
++let resolveDesktopProxyOptions: typeof import("../../electron/network/desktop-proxy").resolveDesktopProxyOptions;
++let getDesktopProxyStartupErrorMessage: typeof import("../../electron/network/desktop-proxy").getDesktopProxyStartupErrorMessage;
++let getDesktopProxyStatus: typeof import("../../electron/network/desktop-proxy").getDesktopProxyStatus;
++let getDesktopProxySettingsPath: typeof import("../../electron/network/desktop-proxy").getDesktopProxySettingsPath;
++test.beforeAll(async () => {
++  ({
++    createDesktopProxyDispatcher,
++    initializeDesktopProxy,
++    resolveDesktopProxyOptions,
++    getDesktopProxyStartupErrorMessage,
++    getDesktopProxyStatus,
++    getDesktopProxySettingsPath,
++  } = await jiti.import<typeof import("../../electron/network/desktop-proxy")>(
++    "../../electron/network/desktop-proxy.ts",
++  ));
++});
++
++test("proxy status is unavailable until initialization succeeds", () => {
++  expect(() => getDesktopProxyStatus()).toThrow(
++    "Desktop proxy status is unavailable before initialization completes.",
++  );
++});
++
++test("startup error messages classify settings and each proxy variable without leaking values", async () => {
++  const agentDir = await mkdtemp(join(tmpdir(), "pi-gui-proxy-errors-"));
++  await writeFile(join(agentDir, "settings.json"), "{bad", "utf8");
++  const startupMessage = async (env: NodeJS.ProcessEnv) => {
++    try {
++      await initializeDesktopProxy({ agentDir, env });
++      return "did not reject";
++    } catch (error) {
++      return getDesktopProxyStartupErrorMessage(error);
++    }
++  };
++  const jsonError = await startupMessage({});
++  expect(getDesktopProxySettingsPath()).toBe(join(agentDir, "settings.json"));
++  expect(jsonError).toContain("invalid JSON");
++  expect(jsonError).not.toContain("bad");
++  await writeFile(join(agentDir, "settings.json"), "{}", "utf8");
++  expect(await startupMessage({ HTTP_PROXY: "socks5://u:pass@x" })).toContain("HTTP_PROXY");
++  expect(await startupMessage({ HTTPS_PROXY: "socks5://u:pass@x" })).toContain("HTTPS_PROXY");
++  await writeFile(
++    join(agentDir, "settings.json"),
++    JSON.stringify({ httpProxy: "socks5://private:secret@x" }),
++    "utf8",
++  );
++  const explicitError = await startupMessage({});
++  expect(explicitError).toContain("httpProxy");
++  expect(explicitError).not.toContain("secret");
++  expect(getDesktopProxyStartupErrorMessage(new Error("secret details"))).toBe(
++    "Unable to initialize proxy settings. Check Pi settings and proxy environment variables.",
++  );
++});
++
++test("proxy status reports the effective, redacted source and HTTPS fallback", async () => {
++  const agentDir = await mkdtemp(join(tmpdir(), "pi-gui-proxy-status-"));
++  await writeFile(
++    join(agentDir, "settings.json"),
++    JSON.stringify({ httpProxy: "https://user:pass@proxy.example:8443" }),
++    "utf8",
++  );
++  const dispatcher = await initializeDesktopProxy({
++    agentDir,
++    env: { HTTP_PROXY: "http://env.example:8080", NO_PROXY: ".internal" },
++  });
++  try {
++    expect(getDesktopProxyStatus()).toEqual({
++      source: "pi-settings",
++      httpProxy: "https://proxy.example:8443",
++      httpsProxy: "https://proxy.example:8443",
++      noProxy: ".internal",
++      settingsPath: join(agentDir, "settings.json"),
++    });
++  } finally {
++    await dispatcher.close();
++  }
++
++  await writeFile(join(agentDir, "settings.json"), "{}", "utf8");
++  const envDispatcher = await initializeDesktopProxy({
++    agentDir,
++    env: { HTTP_PROXY: "http://user:pass@env.example:8080", NO_PROXY: "" },
++  });
++  try {
++    expect(getDesktopProxyStatus()).toMatchObject({
++      source: "environment",
++      httpProxy: "http://env.example:8080",
++      httpsProxy: "http://env.example:8080",
++    });
++  } finally {
++    await envDispatcher.close();
++  }
++});
++
++test("resolves explicit, environment, and protocol-specific proxy configuration", () => {
++  const explicit = resolveDesktopProxyOptions(
++    { httpProxy: " https://user:pass@proxy.example:8443 " },
++    {
++      HTTP_PROXY: "http://env.example:8080",
++      HTTPS_PROXY: "http://secure.example:8081",
++      NO_PROXY: ".local",
++    },
++  );
++  expect(explicit).toEqual({
++    httpProxy: "https://user:pass@proxy.example:8443",
++    httpsProxy: "https://user:pass@proxy.example:8443",
++    noProxy: ".local",
++  });
++  expect(resolveDesktopProxyOptions({ httpProxy: "  " }, { HTTP_PROXY: "http://h:1" })).toEqual({
++    httpProxy: "http://h:1",
++    httpsProxy: "",
++    noProxy: "",
++  });
++  expect(resolveDesktopProxyOptions({}, { HTTPS_PROXY: "http://s:2" })).toEqual({
++    httpProxy: "",
++    httpsProxy: "http://s:2",
++    noProxy: "",
++  });
++  expect(resolveDesktopProxyOptions({}, {})).toEqual({
++    httpProxy: "",
++    httpsProxy: "",
++    noProxy: "",
++  });
++  expect(
++    resolveDesktopProxyOptions(
++      { httpProxy: "http://explicit.example:80" },
++      { HTTP_PROXY: "socks5://invalid:secret", HTTPS_PROXY: "not a proxy" },
++    ),
++  ).toEqual({
++    httpProxy: "http://explicit.example:80",
++    httpsProxy: "http://explicit.example:80",
++    noProxy: "",
++  });
++});
++
++test("rejects invalid explicit/environment proxy values without echoing credentials", () => {
++  for (const settings of [
++    { httpProxy: null },
++    { httpProxy: 7 },
++    { httpProxy: "socks5://u:p@host" },
++    { httpProxy: "http://u:p@%" },
++  ]) {
++    expect(() => resolveDesktopProxyOptions(settings, {})).toThrow("Invalid httpProxy");
++  }
++  expect(() =>
++    resolveDesktopProxyOptions({}, { HTTPS_PROXY: "socks5://name:secret@proxy" }),
++  ).toThrow("HTTPS_PROXY");
++
++  for (const httpProxy of [null, 7]) {
++    let errorMessage = "";
++    try {
++      resolveDesktopProxyOptions({ httpProxy }, {});
++    } catch (error) {
++      errorMessage = getDesktopProxyStartupErrorMessage(error);
++    }
++    expect(errorMessage).toContain("Invalid httpProxy");
++    expect(errorMessage).not.toContain("Unable to initialize proxy settings");
++  }
++});
++
++test("dispatcher construction failures do not claim a specific environment variable", () => {
++  let errorMessage = "";
++  try {
++    createDesktopProxyDispatcher({ httpProxy: "http://private:secret@proxy.example/path" }, {});
++  } catch (error) {
++    errorMessage = getDesktopProxyStartupErrorMessage(error);
++  }
++  expect(errorMessage).toContain("configured proxy");
++  expect(errorMessage).not.toContain("HTTP_PROXY");
++  expect(errorMessage).not.toContain("HTTPS_PROXY");
++  expect(errorMessage).not.toContain("secret");
++});
++
++test("a local CONNECT proxy carries successive HTTP and SSE requests", async () => {
++  const requests: string[] = [];
++  const origin = createServer((request: IncomingMessage, response: ServerResponse) => {
++    requests.push(request.url ?? "");
++    if (request.url === "/events") {
++      response.writeHead(200, { "content-type": "text/event-stream" });
++      response.end("data: ready\n\n");
++      return;
++    }
++    response.writeHead(200, { "content-type": "application/json" });
++    response.end(JSON.stringify({ path: request.url }));
++  });
++  const originUrl = await listenLoopback(origin);
++  const proxy = await startLocalConnectProxy();
++  const previousDispatcher = getGlobalDispatcher();
++  const dispatcher = createDesktopProxyDispatcher({}, { HTTP_PROXY: proxy.url, NO_PROXY: "" });
++  try {
++    const one = await undiciFetch(`${originUrl}/first`, { dispatcher });
++    expect(await one.json()).toEqual({ path: "/first" });
++    const two = await undiciFetch(`${originUrl}/events`, { dispatcher });
++    expect(await two.text()).toBe("data: ready\n\n");
++    const three = await undiciFetch(`${originUrl}/after-tool`, { dispatcher });
++    expect(await three.json()).toEqual({ path: "/after-tool" });
++    expect(requests).toEqual(["/first", "/events", "/after-tool"]);
++    expect(proxy.tunnels()).toBeGreaterThanOrEqual(1);
++  } finally {
++    setGlobalDispatcher(previousDispatcher);
++    await dispatcher.close();
++    await proxy.close();
++    await new Promise<void>((resolve) => origin.close(() => resolve()));
++  }
++});
++
++test("NO_PROXY bypasses both explicit and environment proxy sources", async () => {
++  const origin = createServer((_request, response) => response.end("direct"));
++  const originUrl = await listenLoopback(origin);
++  const proxy = await startLocalConnectProxy();
++  for (const settings of [{ httpProxy: proxy.url }, {}]) {
++    const previousDispatcher = getGlobalDispatcher();
++    const dispatcher = createDesktopProxyDispatcher(settings, {
++      HTTP_PROXY: settings.httpProxy ? undefined : proxy.url,
++      NO_PROXY: "127.0.0.1",
++    });
++    try {
++      const response = await undiciFetch(originUrl, { dispatcher });
++      expect(await response.text()).toBe("direct");
++      expect(proxy.tunnels()).toBe(0);
++    } finally {
++      setGlobalDispatcher(previousDispatcher);
++      await dispatcher.close();
++    }
++  }
++  await proxy.close();
++  await new Promise<void>((resolve) => origin.close(() => resolve()));
++});
++
++test("an unreachable local proxy fails a real request without exposing proxy credentials", async () => {
++  const dispatcher = createDesktopProxyDispatcher(
++    {},
++    {
++      HTTP_PROXY: "http://private-user:private-password@127.0.0.1:1",
++      NO_PROXY: "",
++    },
++  );
++  try {
++    let message = "";
++    try {
++      await undiciFetch("http://example.invalid/", { dispatcher });
++    } catch (error) {
++      message = error instanceof Error ? error.message : String(error);
++    }
++    expect(message).not.toBe("");
++    expect(message).not.toContain("private-user");
++    expect(message).not.toContain("private-password");
++  } finally {
++    await dispatcher.close();
++  }
++});
++
++test("installed dispatcher carries a WebSocket handshake and message through CONNECT", async () => {
++  const origin = createServer();
++  origin.on("upgrade", (request, socket) => {
++    const key = request.headers["sec-websocket-key"];
++    if (typeof key !== "string") return socket.destroy();
++    const accept = createHash("sha1")
++      .update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`)
++      .digest("base64");
++    socket.write(
++      `HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`,
++    );
++    socket.write(Buffer.from([0x81, 0x02, 0x6f, 0x6b]));
++    socket.end();
++  });
++  const originUrl = await listenLoopback(origin);
++  const proxy = await startLocalConnectProxy();
++  const agentDir = await mkdtemp(join(tmpdir(), "pi-gui-proxy-ws-"));
++  await writeFile(
++    join(agentDir, "settings.json"),
++    JSON.stringify({ httpProxy: proxy.url }),
++    "utf8",
++  );
++  const previousDispatcher = getGlobalDispatcher();
++  const installedGlobalNames = [
++    "fetch",
++    "Headers",
++    "Request",
++    "Response",
++    "FormData",
++    "WebSocket",
++    "EventSource",
++  ];
++  const originalGlobals = new Map(
++    installedGlobalNames.map((name) => [name, Object.getOwnPropertyDescriptor(globalThis, name)]),
++  );
++  let installedDispatcher: Awaited<ReturnType<typeof initializeDesktopProxy>> | undefined;
++  try {
++    installedDispatcher = await initializeDesktopProxy({ agentDir, env: { NO_PROXY: "" } });
++    const message = await new Promise<string>((resolve, reject) => {
++      const socket = new WebSocket(originUrl.replace("http://", "ws://"));
++      socket.addEventListener("message", (event) => resolve(String(event.data)), { once: true });
++      socket.addEventListener("error", () => reject(new Error("WebSocket failed")), { once: true });
++    });
++    expect(message).toBe("ok");
++    expect(proxy.tunnels()).toBeGreaterThan(0);
++  } finally {
++    setGlobalDispatcher(previousDispatcher);
++    await installedDispatcher?.destroy();
++    for (const [name, descriptor] of originalGlobals) {
++      if (descriptor) Object.defineProperty(globalThis, name, descriptor);
++      else Reflect.deleteProperty(globalThis, name);
++    }
++    await proxy.close();
++    await new Promise<void>((resolve) => origin.close(() => resolve()));
++  }
++});
++
++test("HTTP_PROXY and HTTPS_PROXY route HTTP, HTTPS, and WSS through local CONNECT tunnels", async () => {
++  const [cert, key] = await Promise.all([
++    readFile(join(testCertificateDirectory, "localhost-cert.pem"), "utf8"),
++    readFile(join(testCertificateDirectory, "localhost-key.pem"), "utf8"),
++  ]);
++  const secureOrigin = createHttpsServer({ cert, key }, (_req, res) => {
++    res.writeHead(200, { "content-type": "text/plain" });
++    res.end("tls-through-proxy");
++  });
++  const websocketOrigin = createHttpsServer({ cert, key });
++  websocketOrigin.on("upgrade", (request, socket) => {
++    const keyHeader = request.headers["sec-websocket-key"];
++    if (typeof keyHeader !== "string") return socket.destroy();
++    const accept = createHash("sha1")
++      .update(`${keyHeader}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`)
++      .digest("base64");
++    socket.write(
++      `HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`,
++    );
++    socket.write(Buffer.from([0x81, 0x02, 0x6f, 0x6b]));
++    socket.end();
++  });
++  const plainOrigin = createServer((_req, res) => res.end("http-through-proxy"));
++  const plainUrl = await listenLoopback(plainOrigin);
++  const secureUrl = (await listenLoopback(secureOrigin)).replace("http://", "https://");
++  const websocketUrl = (await listenLoopback(websocketOrigin)).replace("http://", "wss://");
++  const httpProxy = await startLocalConnectProxy();
++  const httpsProxy = await startLocalConnectProxy();
++  try {
++    const { stdout } = await runNodeWithTrustedTestCertificate(
++      join(__dirname, "../helpers/proxy-tls-child.mjs"),
++      [httpProxy.url, httpsProxy.url, plainUrl, secureUrl, websocketUrl],
++      resolve(join(testCertificateDirectory, "localhost-cert.pem")),
++    );
++    expect(stdout).toContain("HTTP, HTTPS, and WSS proxy fixtures passed");
++    expect(httpProxy.tunnels()).toBeGreaterThan(0);
++    expect(httpsProxy.tunnels()).toBeGreaterThanOrEqual(2);
++  } finally {
++    await httpsProxy.close();
++    await httpProxy.close();
++    await new Promise<void>((resolve) => plainOrigin.close(() => resolve()));
++    await new Promise<void>((resolve) => secureOrigin.close(() => resolve()));
++    await new Promise<void>((resolve) => websocketOrigin.close(() => resolve()));
++  }
++});
+diff --git a/apps/desktop/tests/unit/git-review.spec.ts b/apps/desktop/tests/unit/git-review.spec.ts
+index f472618..54a2f9a 100644
+--- a/apps/desktop/tests/unit/git-review.spec.ts
++++ b/apps/desktop/tests/unit/git-review.spec.ts
+@@ -284,14 +284,18 @@ test("uses configured remote HEAD and reports missing or unrelated branch bases"
+ test("makes binary, deleted, empty, conflict, and submodule coverage explicit", async () => {
+   const cwd = await repository();
+   await writeFile(join(cwd, "binary.dat"), Buffer.from([1, 0, 2]));
++  await writeFile(join(cwd, "added.txt"), "new addition\n");
+   await writeFile(join(cwd, "empty.txt"), "");
+   await unlink(join(cwd, "file.txt"));
+   let review = await uncommitted(cwd);
+   const binary = (await fileContent(review, "binary.dat")).result;
+   expect(binary.coverage).toMatchObject({ state: "partial" });
+   expect(binary.coverage.notes.join(" ")).toContain("Binary");
++  expect((await fileContent(review, "added.txt")).result.patch).toContain("+new addition");
+   expect((await fileContent(review, "empty.txt")).result.patch).toContain("new file mode");
+-  expect((await fileContent(review, "file.txt")).result.patch).toContain("deleted file mode");
++  const deleted = (await fileContent(review, "file.txt")).result.patch;
++  expect(deleted).toContain("deleted file mode");
++  expect(deleted).toContain("-base");
+   const subOid = (await git(cwd, "rev-parse", "HEAD")).trim();
+   await git(cwd, "update-index", "--add", "--cacheinfo", `160000,${subOid},nested`);
+   await mkdir(join(cwd, "nested"));
+diff --git a/apps/desktop/tests/unit/interface-zoom.spec.ts b/apps/desktop/tests/unit/interface-zoom.spec.ts
+new file mode 100644
+index 0000000..1769e35
+--- /dev/null
++++ b/apps/desktop/tests/unit/interface-zoom.spec.ts
+@@ -0,0 +1,71 @@
++import { mkdtemp, readFile, writeFile } from "node:fs/promises";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++import { expect, test } from "@playwright/test";
++import { interfaceZoomLevels, isInterfaceZoom } from "../../contracts/desktop-state";
++import {
++  decodePersistedUiState,
++  decodePersistedInterfaceZoom,
++  readPersistedInterfaceZoom,
++  writePersistedInterfaceZoom,
++} from "../../electron/persistence/app-store-persistence";
++
++test("accepts only supported interface zoom percentages", async () => {
++  for (const level of interfaceZoomLevels) {
++    expect(isInterfaceZoom(level)).toBe(true);
++  }
++
++  for (const value of [Number.NaN, Number.POSITIVE_INFINITY, "100", 115, 200, null]) {
++    expect(isInterfaceZoom(value)).toBe(false);
++    expect(() => decodePersistedInterfaceZoom({ interfaceZoom: value })).toThrow(
++      "Invalid persisted interface zoom",
++    );
++  }
++
++  const userDataDir = await mkdtemp(join(tmpdir(), "pi-gui-interface-zoom-state-"));
++  const sidecarPath = join(userDataDir, "interface-zoom.json");
++  expect(await readPersistedInterfaceZoom(sidecarPath)).toBe(100);
++  for (const level of interfaceZoomLevels) {
++    await writePersistedInterfaceZoom(sidecarPath, level);
++    expect(await readPersistedInterfaceZoom(sidecarPath)).toBe(level);
++  }
++
++  for (const value of ["100", 115, 200, null]) {
++    await writeFile(sidecarPath, JSON.stringify({ interfaceZoom: value }), "utf8");
++    expect(await readPersistedInterfaceZoom(sidecarPath)).toBe(100);
++  }
++  await writeFile(sidecarPath, JSON.stringify({ interfaceZoom: 115 }), "utf8");
++  expect(await readPersistedInterfaceZoom(sidecarPath)).toBe(100);
++  await expect(readFile(sidecarPath, "utf8")).resolves.toContain('"interfaceZoom":115');
++});
++
++test("recovers the last valid interface zoom from its sidecar backup", async () => {
++  const userDataDir = await mkdtemp(join(tmpdir(), "pi-gui-interface-zoom-backup-"));
++  const sidecarPath = join(userDataDir, "interface-zoom.json");
++
++  await writePersistedInterfaceZoom(sidecarPath, 125);
++  await writePersistedInterfaceZoom(sidecarPath, 150);
++  await writeFile(sidecarPath, "{ truncated", "utf8");
++
++  await expect(readPersistedInterfaceZoom(sidecarPath)).resolves.toBe(125);
++});
++
++test("decodes v1.0.1 builtin settings while zoom remains isolated in its sidecar", async () => {
++  const userDataDir = await mkdtemp(join(tmpdir(), "pi-gui-ui-zoom-compat-"));
++  const uiStatePath = join(userDataDir, "ui-state.json");
++  const sidecarPath = join(userDataDir, "interface-zoom.json");
++  const uiState = {
++    version: 19,
++    disabledBuiltinExtensions: ["pi-gui-thread-orchestration"],
++  };
++  await writeFile(uiStatePath, `${JSON.stringify(uiState)}\n`, "utf8");
++
++  expect(decodePersistedUiState(uiState).disabledBuiltinExtensions).toEqual(
++    uiState.disabledBuiltinExtensions,
++  );
++  await writePersistedInterfaceZoom(sidecarPath, 125);
++
++  await expect(readPersistedInterfaceZoom(sidecarPath)).resolves.toBe(125);
++  await expect(readFile(uiStatePath, "utf8")).resolves.toBe(`${JSON.stringify(uiState)}\n`);
++  await expect(readFile(sidecarPath, "utf8")).resolves.toContain('"interfaceZoom": 125');
++});
+diff --git a/apps/desktop/tests/unit/provider-model-probe.spec.ts b/apps/desktop/tests/unit/provider-model-probe.spec.ts
+new file mode 100644
+index 0000000..3c6b9e5
+--- /dev/null
++++ b/apps/desktop/tests/unit/provider-model-probe.spec.ts
+@@ -0,0 +1,119 @@
++import { expect, test } from "@playwright/test";
++import { createJiti } from "jiti";
++
++const jiti = createJiti(__filename);
++let probeCustomProviderModels: typeof import("../../electron/network/provider-model-probe").probeCustomProviderModels;
++test.beforeAll(async () => {
++  ({ probeCustomProviderModels } = await jiti.import<
++    typeof import("../../electron/network/provider-model-probe")
++  >("../../electron/network/provider-model-probe.ts"));
++});
++
++test("model probe sends the models GET with Bearer auth and keeps usable IDs", async () => {
++  let requestedUrl = "";
++  let requestInit: RequestInit | undefined;
++  const fetchImpl: typeof fetch = async (input, init) => {
++    requestedUrl = String(input);
++    requestInit = init;
++    return new Response(JSON.stringify({ data: [{ id: "a" }, { id: "" }, {}, { id: "b" }] }), {
++      status: 200,
++      headers: { "content-type": "application/json" },
++    });
++  };
++  await expect(
++    probeCustomProviderModels(
++      { baseUrl: "http://provider.example/v1/", apiKey: " key " },
++      fetchImpl,
++    ),
++  ).resolves.toEqual({ ok: true, models: ["a", "b"] });
++  expect(requestedUrl).toBe("http://provider.example/v1/models");
++  expect(requestInit?.method).toBe("GET");
++  expect(new Headers(requestInit?.headers).get("authorization")).toBe("Bearer key");
++  expect(requestInit?.signal).toBeInstanceOf(AbortSignal);
++});
++
++test("model probe validates the base URL and reports response contracts", async () => {
++  const fetchImpl: typeof fetch = async () =>
++    new Response(JSON.stringify({ models: [] }), { status: 200 });
++  await expect(probeCustomProviderModels({ baseUrl: "file:///tmp" }, fetchImpl)).resolves.toEqual({
++    ok: false,
++    error: "Base URL must start with http:// or https://",
++  });
++  await expect(
++    probeCustomProviderModels({ baseUrl: "http://provider.example/v1" }, fetchImpl),
++  ).resolves.toMatchObject({
++    ok: false,
++    error: 'Response from http://provider.example/v1/models is missing a "data" array',
++  });
++  await expect(
++    probeCustomProviderModels(
++      { baseUrl: "http://user:secret@provider.example/v1" },
++      async () => new Response("unavailable", { status: 502, statusText: "Bad Gateway" }),
++    ),
++  ).resolves.toMatchObject({
++    ok: false,
++    error: "502 Provider service error at http://provider.example/v1/models. Try again later.",
++  });
++});
++
++test("model probe gives actionable authentication, proxy, and rate-limit errors", async () => {
++  for (const [status, expected] of [
++    [401, "Authentication or permission failed"],
++    [403, "Authentication or permission failed"],
++    [407, "Proxy authentication required"],
++    [429, "Provider rate limit reached"],
++    [503, "Provider service error"],
++  ] as const) {
++    const result = await probeCustomProviderModels(
++      { baseUrl: "http://user:secret@provider.example/v1?token=hidden" },
++      async () => new Response("", { status }),
++    );
++    expect(result).toMatchObject({ ok: false });
++    if (!result.ok) {
++      expect(result.error).toContain(expected);
++      expect(result.error).not.toContain("secret");
++      expect(result.error).not.toContain("hidden");
++    }
++  }
++});
++
++test("model probe describes TLS and timeout failures without exposing nested causes", async () => {
++  for (const [name, code, expected] of [
++    ["TimeoutError", undefined, "Timed out after 5s"],
++    ["TypeError", "ERR_TLS_CERT_ALTNAME_INVALID", "Could not verify the TLS certificate"],
++    ["TypeError", "ETIMEDOUT", "Timed out contacting"],
++  ] as const) {
++    const error = Object.assign(new Error("secret-url-with-creds"), {
++      name,
++      cause: { code, message: "private details" },
++    });
++    const result = await probeCustomProviderModels(
++      { baseUrl: "http://provider.example" },
++      async () => {
++        throw error;
++      },
++    );
++    expect(result).toMatchObject({ ok: false });
++    if (!result.ok) {
++      expect(result.error).toContain(expected);
++      expect(result.error).not.toContain("secret-url");
++      expect(result.error).not.toContain("private details");
++    }
++  }
++});
++
++test("model probe hides credentials when fetch fails", async () => {
++  const fetchImpl: typeof fetch = async () => {
++    throw new TypeError("fetch failed: http://proxy-user:proxy-secret@proxy.example:8080");
++  };
++  const result = await probeCustomProviderModels(
++    { baseUrl: "http://provider-user:provider-secret@provider.example/v1", apiKey: "token-secret" },
++    fetchImpl,
++  );
++  expect(result.ok).toBe(false);
++  if (!result.ok) {
++    expect(result.error).not.toContain("proxy-secret");
++    expect(result.error).not.toContain("provider-secret");
++    expect(result.error).not.toContain("token-secret");
++  }
++});
+diff --git a/docs/interface-zoom.md b/docs/interface-zoom.md
+new file mode 100644
+index 0000000..11bb7ab
+--- /dev/null
++++ b/docs/interface-zoom.md
+@@ -0,0 +1,31 @@
++# Interface zoom
++
++Interface zoom scales the app as one surface. It is useful when the default text and controls are too small or too large for the current display.
++
++## Change the zoom
++
++Open **Settings → Appearance** and choose **Interface zoom**. The available levels are **90%, 100%, 110%, 125%, and 150%**. The Appearance section also has **Reset to 100%**. **125%** is a useful starting point on a high-DPI display when the default feels too small.
++
++Keyboard shortcuts work when the integrated terminal does not have focus:
++
++- **Ctrl+-** (macOS: **⌘-**) steps down one level.
++- **Ctrl+=** (macOS: **⌘=**) steps up one level.
++- **Ctrl+0** (macOS: **⌘0**) resets to 100%.
++
++At either limit, stepping farther keeps the current level. When the integrated terminal has focus, these key presses are left to the shell.
++
++## Saved setting and compatibility
++
++The selected level is saved in `interface-zoom.json` in the app's user data directory, separately from the existing `ui-state.json`. This keeps the zoom preference independent of the older UI-state format and leaves existing UI state available to older builds. If the zoom sidecar is missing or cannot be read as a supported value, the app starts at 100%; when a valid backup is available, it can recover from that backup. The zoom preference is shared by windows that use the same app user data directory.
++
++## Proxy.3 test entry
++
++Launch the installed build from the separate **Pi GUI proxy.3 测试版** shortcut on the Desktop. It runs the ordinary CMD helper at `F:\Apps\pi-gui-proxy\scripts\launch-proxy3-test.cmd`, which starts the proxy.3 executable and sets `PI_APP_USER_DATA_DIR` to `%LOCALAPPDATA%\pi-gui-proxy-build`. Keep the existing proxy.2 shortcut for proxy.2; installing or launching proxy.3 does not activate it as the default build.
++
++## Verification status
++
++For this build, the packaged `main.js`, `preload.js`, renderer `index.html`, and every renderer asset were compared byte-for-byte with the corresponding files in `apps/desktop/out`. The hashes and sizes are recorded in `.artifacts/interface-zoom/package-check.json`.
++
++The core interface-zoom acceptance passed, and native screenshot review confirmed the 125% and 150% layouts. An earlier Ctrl+- discrepancy came from the test CDP/input route and screenshot coordinate measurement; no product CSS change was needed. Packaged-app acceptance passed both the interface-zoom and proxy-status cases (2/2, one worker, no retries); see `.artifacts/interface-zoom/run-packaged/packaged-tests.log`. No real-provider conversation was run for this zoom change.
++
++Quit the current Pi GUI completely before switching between proxy.2 and proxy.3: they share a user-data directory and a single-instance lock. On 2026-09-27 the user reported that proxy.3 trial use had revealed no problems so far; this is user feedback, separate from automated acceptance.
+diff --git a/docs/personal-builds.md b/docs/personal-builds.md
+new file mode 100644
+index 0000000..fe84902
+--- /dev/null
++++ b/docs/personal-builds.md
+@@ -0,0 +1,44 @@
++# Windows personal builds
++
++Personal Windows builds live in `F:\Apps\pi-gui-proxy\versions\<id>`. Each installed id is an immutable directory containing the unpacked Electron application and a `manifest.json`. The stable launcher is `F:\Apps\pi-gui-proxy\pi-gui-proxy.cmd`; its selected version is recorded in `state.json` as `current` and `previous`.
++
++The `Start pi-gui proxy.lnk` shortcut launches a hidden PowerShell helper; the selected Pi GUI remains a normal visible application. `pi-gui-proxy.cmd` is available as a backup entry point. Both read and validate the selected manifest and SHA256 of `resources/app.asar` each time they start. Selection changes affect the next full launch. The deploy tool never terminates a running process and never migrates or removes app data. Personal build identity is the package version plus build label, for example `0.1.0-beta.40-proxy.2`.
++
++## First setup
++
++Run the following from a PowerShell prompt in the repository. The bootstrap refuses to overwrite an existing launcher or deployment script.
++
++```powershell
++powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File .\apps\desktop\scripts\personal-deploy.ps1 -Mode Bootstrap
++# On an empty stable directory, install this build before activating it.
++$deploy = 'F:\Apps\pi-gui-proxy\scripts\personal-deploy.ps1'
++powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File $deploy -Mode Install -Id 0.1.0-beta.40-proxy.1 -BundlePath F:\path\to\proxy.1\win-unpacked
++powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File $deploy -Mode Activate -Id 0.1.0-beta.40-proxy.1
++```
++
++Bootstrap installs the shortcut, fixed command launcher, and a copy of the deployment script under the stable directory. `-ExecutionPolicy RemoteSigned` applies only to that PowerShell process; it does not alter machine or user policy. On the current personal install, `proxy.1` is already installed; the activation command above is a maintenance example. For a new install, use the actual unpacked build path and matching id.
++
++## Install and switch builds
++
++Build the unpacked Windows app with the selected personal label and create a `manifest.json` beside `pi-gui.exe`. The manifest's `id` must match `<package-version>-<build-label>`, and `bundleHash` must be the lowercase SHA256 of `resources/app.asar`. Then install and select it:
++
++```powershell
++$deploy = 'F:\Apps\pi-gui-proxy\scripts\personal-deploy.ps1'
++powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File $deploy -Mode Install -Id 0.1.0-beta.40-proxy.2 -BundlePath F:\path\to\win-unpacked
++powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File $deploy -Mode List
++powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File $deploy -Mode Activate -Id 0.1.0-beta.40-proxy.2
++```
++
++`Install` refuses an existing id and does not activate it. `Activate` accepts only a complete version directory with a matching manifest and app archive hash. The state file is replaced atomically, so an interrupted or invalid switch leaves the prior selection intact.
++
++Rollback to the previously selected installed version:
++
++```powershell
++powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File $deploy -Mode Rollback
++```
++
++The rollback command above selects the previous build; to switch to a specific installed version, run `powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File $deploy -Mode Activate -Id 0.1.0-beta.40-proxy.1`. Close the app normally and use `Start pi-gui proxy.lnk` for the next full start. Switching never force-closes an open app. The launcher scopes `PI_APP_USER_DATA_DIR` to `%LOCALAPPDATA%\pi-gui-proxy-build` for the GUI child process, then restores its own environment. The app continues to use the existing Pi configuration and authentication in the user's normal profile; the personal deploy tool does not read credentials or modify those settings.
++
++## Synthetic verification
++
++Run `powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File apps\desktop\scripts\personal-deploy.test.ps1` to exercise synthetic installs, overwrite and invalid-id rejection, source-path overlap protection, activation, rollback, corrupt target rejection, hash failure, child-only user-data scoping, and the generated CMD launcher with a root containing spaces and `&`. The test retains its temporary deployment artifacts for diagnosis and never accesses user credentials.
+diff --git a/docs/proxy-support.md b/docs/proxy-support.md
+new file mode 100644
+index 0000000..6358519
+--- /dev/null
++++ b/docs/proxy-support.md
+@@ -0,0 +1,75 @@
++# Windows 桌面代理支持
++
++本文说明 pi-gui 桌面主进程中的 provider 代理配置与维护范围。代理在应用启动时读取 Pi 全局 agent 设置；修改配置后需完全退出并重新启动 pi-gui。
++
++## 配置
++
++首选在 Pi agent 目录的 `settings.json` 中设置 `httpProxy`。Pi 0.87.1 的公开 `getAgentDir()` 使用 `PI_CODING_AGENT_DIR`（或默认 `~/.pi/agent`）解析该目录。示例：
++
++```json
++{
++  "httpProxy": "http://127.0.0.1:7890"
++}
++```
++
++代理地址只支持 `http://` 和 `https://`。SOCKS、PAC 及其他 scheme 不支持。显式设置必须是字符串和有效 URL；非字符串、格式错误或不支持的 scheme 会阻止应用启动，并提示检查配置。空白字符串视为未设置。错误提示不应包含代理用户名、密码或 URL。
++
++缺少显式设置时使用环境变量。环境变量按目标协议选择：
++
++| Pi `httpProxy` | `HTTP_PROXY` | `HTTPS_PROXY` | HTTP / `ws://` | HTTPS / `wss://` |
++| -------------- | ------------ | ------------- | -------------- | ---------------- |
++| 有效非空       | 任意值       | 任意值        | 显式代理       | 显式代理         |
++| 缺失或空白     | 已设置       | 已设置        | `HTTP_PROXY`   | `HTTPS_PROXY`    |
++| 缺失或空白     | 已设置       | 未设置        | `HTTP_PROXY`   | `HTTP_PROXY`     |
++| 缺失或空白     | 未设置       | 已设置        | 直连           | `HTTPS_PROXY`    |
++| 缺失或空白     | 未设置       | 未设置        | 直连           | 直连             |
++
++一个有效的显式 `httpProxy` 优先于环境代理；此时即使环境中的 `HTTP_PROXY` 或 `HTTPS_PROXY` 内容非法，也不会影响该显式配置。没有有效显式值时，非法的已设置环境代理会产生安全错误，不会静默回退直连。大小写环境变量名归一为同一配置槽，不视为两个独立代理。
++
++`NO_PROXY`（也可用小写 `no_proxy`）在显式和环境代理下都生效，命中时绕过代理。实现采用 Undici 8.5 `EnvHttpProxyAgent` 语义：逗号或空格分隔的主机项；支持主机、子域、`.example.com` / `*.example.com` 通配符、可选 `:port`，以及单独的 `*` 全部绕过。环境值会在启动时读取为快照，运行中更改变量或 settings 文件都需重启。
++
++没有 GUI 代理开关或热更新。本模块不改写 `process.env`。
++
++General 设置页的 **Pi and proxy** 区域只读展示应用版本与构建标签、启动时记录的代理来源、HTTP/HTTPS 代理地址和 `NO_PROXY`。Refresh 重新读取这份启动快照，不会探测 provider 连通性，也不会应用运行期间对设置或环境变量的修改；改动需完全退出并重启 pi-gui。**Open Pi settings** 打开当前用户 Pi agent 目录中的固定 `settings.json`。这一区域是配置状态展示，不是连通性诊断工具。
++
++## 覆盖范围
++
++初始化发生在 Electron `app.whenReady()` 处理期间、创建 Pi provider runtime 之前。Node 全局 Undici dispatcher 与 `undici.install()` 用于 provider HTTP、流式 HTTP/SSE、OpenAI Codex Responses WebSocket，以及 Pi OpenAI Codex OAuth 授权码交换和 token 刷新。Pi 0.87.1 OAuth 源码调用全局 `fetch`；Codex provider 非 Bun 路径使用 `globalThis.WebSocket`。这说明请求会进入本进程的全局 Node 网络配置，但源码检查本身不证明代理握手或真实账号流量已通过验收。
++
++桌面自定义 provider 模型探测调用配置后的全局 `fetch`，因此采用同一代理配置。`electron/platform/update-checker.ts` 使用 Electron `net.fetch` 请求 GitHub Releases，不由 Undici dispatcher 覆盖。当前应用在启动约 15 秒后检查一次，之后每 4 小时检查 GitHub Releases；发现新版本时显示通知，点击后打开 Release 页面。检查器本身没有下载或安装更新的逻辑。`electron-builder.yml` 中的 GitHub `publish` 配置是构建发布目标，不等于应用内自动安装更新。外部浏览器打开的页面也不属于本进程的代理承诺。
++
++由工具启动的 `curl`、`git`、`npm` 等子进程不由本模块自动代理；它们各自按自身配置和环境变量工作。本文不声称 pi-gui 的所有网络流量都已代理。
++
++## Windows 目录包隔离
++
++个人版的日常启动入口为 `F:\Apps\pi-gui-proxy\Start pi-gui proxy.lnk`，通过固定启动器选择已部署的个人版本。版本部署与切换方式见[个人版构建与启动](personal-builds.md)。这是个人版本入口，不应将文件复制覆盖到官方安装目录。
++
++旧的独立 Windows 目录包入口 `Start pi-gui proxy build.lnk` 仅保留作历史记录；它调用同目录的 `Start pi-gui proxy build.cmd`，启动脚本仅将 Electron `userData` 指向 `%LOCALAPPDATA%\pi-gui-proxy-build`，保留默认 Pi agent 目录与 settings 配置。它不是当前个人版本的启动入口。NSIS 安装器和 portable 包可能与其他安装共享应用身份，应在核对应用身份、数据目录后再考虑使用。
++
++当前主进程将 Electron `userData` 默认设为 `pi`，可通过 `PI_APP_USER_DATA_DIR` 改到专用目录；这可隔离 pi-gui 的应用数据。Pi provider 设置、模型目录及认证由 Pi agent 目录管理，默认仍与 Pi CLI 共用 `~/.pi/agent`。如需完全隔离运行，应在启动目录包的专用快捷方式环境中设置独立 `PI_CODING_AGENT_DIR`，并在该目录建立独立 `settings.json`；不要复制认证文件。两个隔离变量都要在启动进程环境中设置。确认目标快捷方式指向独立目录包后，再进行启动验证。
++
++## 上游维护
++
++当前补丁基于 pi-gui 上游提交 `97dc3530511310176b171c4d7419127ccd47689c`，所在分支为 `proxy-support`；`upstream` 指向 `https://github.com/minghinmatthewlam/pi-gui.git`。Pi 运行时依赖核对版本为 `@earendil-works/pi-coding-agent` 与 `@earendil-works/pi-ai` `0.87.1`，Undici 为 `8.5.0`。同步上游或升级这些依赖后，重新核对 Electron main 启动顺序、`getAgentDir()` 导出、`EnvHttpProxyAgent` 行为、OAuth fetch 和 Codex WebSocket 实现；保持代理代码为独立小补丁并重新执行相关验证。
++
++Windows 目录包因 Windows code-sign 工具归档包含 macOS 符号链接、而普通开发权限无法解压时，可在确认适用后对单次打包命令覆盖 `--config.win.signAndEditExecutable=false`，例如：
++
++```powershell
++pnpm exec node scripts/package-windows.mjs --win --dir --publish never --config.npmRebuild=false --config.win.signAndEditExecutable=false
++```
++
++这只影响本次目录包命令，不修改 `electron-builder.yml`、全局权限或证书验证设置；产物未签名，且 exe 图标、版本资源可能保留 Electron 默认值，必须在实际产物中核实。不要把该临时覆盖误当作发布签名配置。
++
++不要把带真实凭据的代理 URL、代理密码、token、`auth.json` 内容或个人认证日志写入文档、测试样例和提交。文档中的本机代理地址仅用 `127.0.0.1:7890` 示例。
++
++## 源码核对记录
++
++以下是实现范围的静态源码依据，不代表完整 Windows Electron 或真实 provider 验收已经通过：
++
++- Pi 0.87.1 的 `dist/auth/oauth/openai-codex.js`：`fetchWithLoginCancellation()`、`exchangeAuthorizationCode()`、`refreshAccessToken()` 分别在 85–94、112–125、127–145 行使用全局 `fetch`。
++- Pi 0.87.1 的 `dist/api/openai-codex-responses.js`：733–736 行在非 Bun runtime 读取 `globalThis.WebSocket`，795 行创建 socket。
++- pi-gui 的 `apps/desktop/electron/main.ts`：`app.whenReady()` 启动回调在创建 provider runtime 前初始化代理；失败时显示可打开 Pi settings 或退出的对话框。
++- pi-gui 的 `apps/desktop/electron/network/provider-model-probe.ts`：默认 fetch 参数为 `globalThis.fetch`。
++- pi-gui 的 `apps/desktop/electron/platform/update-checker.ts`：59 行使用 Electron `net.fetch`；`electron-builder.yml` 122–125 行声明 GitHub 发布目标，但检查器只查询 releases 并打开页面。
++- pi-gui 的 `apps/desktop/electron/main.ts`：应用启动配置将应用名设为 `pi` 并设置 `userData`，可选读取 `PI_APP_USER_DATA_DIR`。
++- Pi 0.87.1 的 `dist/config.js`：405–426 行公开的 `getAgentDir()` 使用 `PI_CODING_AGENT_DIR`，缺省目录为用户 home 下 Pi 配置目录。
+diff --git a/docs/proxy-validation.md b/docs/proxy-validation.md
+new file mode 100644
+index 0000000..0e399dc
+--- /dev/null
++++ b/docs/proxy-validation.md
+@@ -0,0 +1,56 @@
++# 代理功能验收记录：Windows 个人构建
++
++更新日期：2026-09-25。**代理第一阶段已完成本次功能验收，Windows 目录包可供个人使用。未创建 PR、未推送远程。**
++
++## 使用方式
++
++- 目录：`F:\GitHub-repository\pi-gui\apps\desktop\release\win-unpacked`。
++- 启动：双击目录内 `Start pi-gui proxy build.lnk`，或 `Start pi-gui proxy build.cmd`。
++- 启动器将应用数据单独放在 `%LOCALAPPDATA%\pi-gui-proxy-build`，沿用现有 Pi CLI 的设置和认证目录。
++- 本机已配置的代理为 `http://127.0.0.1:7897`，使用时保持 Clash HTTP 代理运行。更改代理设置后重启应用。
++- 用户原有 Pi 设置已包含 Git Bash 路径，无需为本次使用修改个人配置。
++- 已按用户要求打开实际应用窗口供使用；这不是测试进程，后续维护不得误关闭。
++
++## 实现范围
++
++全局 Pi `httpProxy` 优先，缺失或空白时使用 HTTP_PROXY / HTTPS_PROXY，NO_PROXY 对两种来源都生效；非法配置不静默回退直连。配置在启动时读取。桌面 provider 的 Node HTTP/SSE/WebSocket 与自定义 provider 模型探测使用同一代理配置。
++
++本阶段没有新增 GUI 代理设置，删除会话和中文化仍延期。外部浏览器、curl/git/npm 子进程，以及使用 Electron net.fetch 的版本检查器不在本模块覆盖范围。
++
++## 验收结果
++
++| 项目                     | 实际结果                                                                                  |
++| ------------------------ | ----------------------------------------------------------------------------------------- |
++| 最终新增 unit            | 10/10 通过；TLS 用例合并并改为自包含子进程，父进程无需 NODE_EXTRA_CA_CERTS                |
++| Electron core            | 8/8 通过，含 Detect models 经实际本地代理及 provider/认证契约回归                         |
++| 开发版真实 Codex         | WebSocket 与 SSE fallback 各 1 项通过，合计 2/2                                           |
++| Windows 目录包真实 Codex | 相同两项通过，合计 2/2                                                                    |
++| 工具调用                 | Git Bash 实际执行成功，检查展开输出及工作区 marker 文件内容，避免把命令输入误当输出       |
++| 路由证据                 | chatgpt.com CONNECT 200；WS open/send/message；强制 WS 失败后 HTTP 200 和实际 SSE data 帧 |
++| 构建与打包依赖           | 桌面构建、Windows 目录包、打包运行依赖检查通过                                            |
++| 直接启动/快捷方式        | 可见窗口、正确 exe 路径及隔离 profile 创建均已验证                                        |
++| 静态检查                 | desktop 两个 tsconfig、架构、ESLint 通过；格式检查排除 Windows 符号链接占位 CLAUDE.md     |
++
++完整 unit 曾运行得到 251 通过、14 失败、3 跳过。将失败旧用例放在全新 worker、排除本次新增代理测试后，13 项 Windows 文件/路径行为失败仍可复现，另 1 项性能预算用例单独通过，记录为波动。用户已同意排除与本次代理改动无关的 Windows 既有问题；这些失败及跳过不计为通过。最终 TLS 测试重构后仅复跑受影响新增 unit，不重复已绿的无关测试。
++
++原先 574 个文件格式失败来自 CRLF 检出，已在不改变源码内容的情况下恢复 LF；它不是未解决问题。
++
++## 证据与维护
++
++仓库：`F:\GitHub-repository\pi-gui`，开发分支 `proxy-support`。
++
++上游基线：`97dc3530511310176b171c4d7419127ccd47689c`。核心实现本地提交：`75c8f53`；测试提交：`349bf5d`。
++
++仓库 `.artifacts/proxy` 中保留：
++
++- `self-contained-unit-rerun.log`、`core-proxy-tests.log`。
++- `full-unit-tests.log`、`known-failed-tests.log`（保留失败记录）。
++- `live-dev-20260925-04`、`live-packaged-20260925-05`：每项含 doctor、截图、trace 和不含认证内容的计数 JSON。
++- `verify-runtime-deps-windows.log`、`launch-direct-result.log`、`launch-shortcut-result.log`。
++- `static-tsc-ui.log`、`static-tsc-electron.log`、`static-architecture.log`、`final-eslint.log`、`static-prettier.log`。
++
++早期 live 尝试中的路径断言错误、SSE MIME 假设、工具输出断言误判均保留为诊断记录，最终通过结论依据修正后的 dev04 和 packaged05。真实验收采用隔离 profile 与私有认证目录，未把认证内容放入报告或提交。
++
++目录包使用本次命令级 `--config.win.signAndEditExecutable=false` 构建，因为当前账户不能解压签名工具中的符号链接。未改系统权限或 TLS 校验；包未签名，EXE 图标和版本资源可能保持 Electron 默认值。此目录包可运行，不等于已制作或验收安装器。
++
++详细使用及覆盖范围见源码仓库 `docs/proxy-support.md`。
+diff --git a/docs/upgrade-v1.0.1.md b/docs/upgrade-v1.0.1.md
+new file mode 100644
+index 0000000..9c80cf2
+--- /dev/null
++++ b/docs/upgrade-v1.0.1.md
+@@ -0,0 +1,30 @@
++# v1.0.1 proxy.4 个人版交付记录
++
++## 构建身份与安装
++
++- 版本：`1.0.1-proxy.4`
++- 源码提交：`c4317cfbce2e1a6e16da51d686d2f6f75b4d00f6`
++- 基线提交：`dd5708fb61a38b5012d0ab149b62054d02c1c72f`
++- 安装目录：`F:\Apps\pi-gui-proxy\versions\1.0.1-proxy.4`
++- 启动程序：`F:\Apps\pi-gui-proxy\versions\1.0.1-proxy.4\pi-gui.exe`
++- 独立测试启动器：`F:\Apps\pi-gui-proxy\scripts\launch-proxy4-test.cmd`
++- 桌面快捷方式：`Pi GUI v1.0.1 proxy.4 测试版.lnk`
++- 用户数据目录：`%LOCALAPPDATA%\pi-gui-proxy-v1`
++
++安装清单位于版本目录 `manifest.json`。包归档 `resources/app.asar` 的 SHA256 为 `c084a35a4ccd93102c78f966f1a0ff5e26cb080a49a5b6998a36d712704b9004`。安装前确认目标目录不存在；安装后源与目标逐文件路径、大小和 SHA256 一致：403 个文件，合计 521,734,927 字节。默认 `state.json` 仍选择 `0.1.0-beta.40-proxy.1`，本次没有 Activate，也没有启动用户日常 profile；打包版界面验收使用隔离 profile。
++
++## 验收状态
++
++打包时的 runtime 依赖检查通过，源码与归档记录见 `.artifacts/upgrade-v1.0.1/package-check-final.json`。分 lane 检查结果：15 unit、25 dev UI 与 2 packaged UI 用例通过；25 项开发版界面检查已包括 16 种主题组合与 Review/侧栏修复复验。packaged UI 证据见 `.artifacts/upgrade-v1.0.1/packaged-final-20260928-a.log` 和 `packaged-proof-20260928-a`。这些是不同 lane 的检查结果，并非一次完整全套测试；本轮没有运行真实 provider。
++
++之前已完成 `%LOCALAPPDATA%\pi-gui-proxy-build` 到 `%LOCALAPPDATA%\pi-gui-proxy-v1` 的冷迁移，8 个文件的 hash 匹配证据记录在 `.artifacts/upgrade-v1.0.1/migration-evidence.json`。这是 2026-09-27 的配置快照：之后在旧版中产生的配置变化不会自动同步到新 profile。Pi 会话目录仍共享，因此该 profile 不是完整的会话历史快照。迁移数据未由本次发布重新复制或覆盖。
++
++## 启动与回退
++
++先正常退出当前运行的旧版 Pi GUI，再用桌面快捷方式启动 proxy.4 进行测试；该快捷方式调用普通可见 CMD，CMD 再调用 `launch-proxy4-test.cmd`，并将 GUI 进程的 `PI_APP_USER_DATA_DIR` 设为独立的 `pi-gui-proxy-v1` 目录。原稳定启动器的 current/previous 选择不受影响。
++
++回退时先完全退出 proxy.4，再打开桌面 `Pi GUI proxy.3 测试版`，即可使用升级前的版本和原桌面配置。无需修改 state.json。proxy.4 安装目录和独立配置保留。
++
++## PowerShell 扩展兼容补丁
++
++另有针对本机 `@4fu/pi-pwsh` 0.10.0 的 Electron 子进程环境兼容补丁，源码副本、隔离 smoke 结果和回退步骤记录于 `F:\learn\Pi-GUI相关文档\pwsh-diagnosis\README.md`。隔离 smoke 已通过；正在打开的 Pi 窗口需重启或重新加载扩展后才能读取磁盘补丁。npm 重新安装或升级该扩展可能覆盖补丁。此补丁在扩展安装目录中，不包含于 proxy.4 应用包。
+\ No newline at end of file

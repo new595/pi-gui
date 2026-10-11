@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "patches": [
+    {"id":"pwsh-runtime","package":"@4fu/pi-pwsh","version":"0.10.0","target":"src/task-runtime.ts","before":"../pwsh-diagnosis/backup-0.10.0-20260927/task-runtime.ts","beforeSha256":"8817B1B4D6B427D545264A0C29111E1271878749EBDF901C8683D808D1F35431","after":"../pwsh-diagnosis/task-runtime.ts","afterSha256":"94E93FB851298D200A35EF292DA60131E4123E769C17ADBD595A22B3EAD51FB5"},
+    {"id":"pwsh-launcher","package":"@4fu/pi-pwsh","version":"0.10.0","target":"src/task-launcher.mjs","before":"../pwsh-diagnosis/backup-0.10.0-20260927/task-launcher.mjs","beforeSha256":"5680F36F2FF79D60C1BFCFEB556B144DF99727C46490AF933B23751CA5D95115","after":"../pwsh-diagnosis/task-launcher.mjs","afterSha256":"52DDA0A0003E1B6088F542BF87F3F268E0FE61C5E3898D428D06567F18C14FD6"},
+    {"id":"subagents-slash","package":"pi-subagents","version":"0.73.1","target":"src/slash/slash-commands.js","before":"../subagents-diagnosis/slash-commands.before.js","beforeSha256":"671127FB56C4AF93D0A19CEF24521879D2260AAA5605E0BE5D0DC671FBA9C576","after":"../subagents-diagnosis/slash-commands.patched.js","afterSha256":"34A0996A3413E427D0221646E530F3DDD5F4A15B0BA10E1F4F6DB39698136395"},
+    {"id":"subagents-background-proxy","package":"pi-subagents","version":"0.73.1","target":"src/runs/background/runner-http-dispatcher.js","before":"../subagents-diagnosis/background-proxy-repair/runner-http-dispatcher.before.js","beforeSha256":"1210DAE21A53CB87C7D8356335BD932D1A26F8E6BA4D691124FC3DC641D325E6","after":"../subagents-diagnosis/background-proxy-repair/runner-http-dispatcher.js","afterSha256":"00B322E44EE01427C25C11CA8C33BF9860B50631A6C69215C5720EA388980518"},
+    {"id":"ask-gui-fallback","package":"@juicesharp/rpiv-ask-user-question","version":"2.11.0","target":"ask-user-question.ts","before":"../subagents-diagnosis/ask-repair/ask-user-question.before.ts","beforeSha256":"3259729A00BA3FCAB4B626B8525FB5B25C76A9583C1B97D51D0E1C6AEDAD3C26","after":"../subagents-diagnosis/ask-repair/ask-user-question.patched.ts","afterSha256":"8ED9621AF8E97F5779C6DD989B4C3BA30A9A48B1D20DF0B61A915EB427044F34"}
+  ],
+  "sdkDependencies": ["@earendil-works/pi-agent-core","@earendil-works/pi-ai","@earendil-works/pi-coding-agent","@earendil-works/pi-tui"],
+  "sdkVersion": "0.87.1"
+}

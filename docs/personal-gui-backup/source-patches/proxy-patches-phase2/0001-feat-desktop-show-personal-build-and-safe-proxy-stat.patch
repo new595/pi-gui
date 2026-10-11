@@ -1,0 +1,1053 @@
+From c54cf6a8c10cae46ac3b2a3c7173784d4d2cc98f Mon Sep 17 00:00:00 2001
+From: MyHome <283594170+new595@users.noreply.github.com>
+Date: Fri, 25 Sep 2026 23:49:27 +0800
+Subject: [PATCH 1/2] feat(desktop): show personal build and safe proxy status
+
+---
+ apps/desktop/contracts/ipc.ts                 |   5 +
+ apps/desktop/contracts/proxy-status.ts        |  12 ++
+ .../electron/ipc/register-desktop-ipc.ts      |  19 ++
+ apps/desktop/electron/main.ts                 |  47 ++++-
+ .../desktop/electron/network/desktop-proxy.ts | 106 +++++++++--
+ .../electron/network/provider-model-probe.ts  |  29 ++-
+ apps/desktop/electron/preload.ts              |   5 +
+ apps/desktop/personal-build.json              |   3 +
+ .../settings/settings-general-section.tsx     |   2 +
+ .../settings/settings-proxy-status.tsx        | 119 ++++++++++++
+ apps/desktop/tests/core/proxy-status.spec.ts  | 176 ++++++++++++++++++
+ apps/desktop/tests/unit/desktop-proxy.spec.ts | 119 +++++++++++-
+ .../tests/unit/provider-model-probe.spec.ts   |  48 ++++-
+ docs/proxy-support.md                         |  12 +-
+ 14 files changed, 669 insertions(+), 33 deletions(-)
+ create mode 100644 apps/desktop/contracts/proxy-status.ts
+ create mode 100644 apps/desktop/personal-build.json
+ create mode 100644 apps/desktop/src/features/settings/settings-proxy-status.tsx
+ create mode 100644 apps/desktop/tests/core/proxy-status.spec.ts
+
+diff --git a/apps/desktop/contracts/ipc.ts b/apps/desktop/contracts/ipc.ts
+index 3ed4637..23a1f8e 100644
+--- a/apps/desktop/contracts/ipc.ts
++++ b/apps/desktop/contracts/ipc.ts
+@@ -13,6 +13,7 @@ import type {
+   SessionTreeSnapshot,
+ } from "@pi-gui/session-driver/types";
+ import type { ClipboardImageRead } from "./composer-attachments";
++import type { DesktopProxyStatus } from "./proxy-status";
+ import type { SessionRef } from "@pi-gui/session-driver/types";
+ import type { SaveTaskWorkbenchTemplateInput, TaskWorkbenchTemplate } from "./workbench";
+ import type {
+@@ -158,6 +159,8 @@ export const desktopIpc = {
+   getNotificationPermissionStatus: "pi-gui:get-notification-permission-status",
+   requestNotificationPermission: "pi-gui:request-notification-permission",
+   openSystemNotificationSettings: "pi-gui:open-system-notification-settings",
++  getProxyStatus: "pi-gui:get-proxy-status",
++  openProxySettings: "pi-gui:open-proxy-settings",
+   notificationPermissionStatusChanged: "pi-gui:notification-permission-status-changed",
+   pickComposerAttachments: "pi-gui:pick-composer-attachments",
+   readClipboardImage: "pi-gui:read-clipboard-image",
+@@ -707,6 +710,8 @@ export interface PiDesktopApi {
+   getNotificationPermissionStatus(): Promise<DesktopNotificationPermissionStatus>;
+   requestNotificationPermission(): Promise<DesktopNotificationPermissionStatus>;
+   openSystemNotificationSettings(): Promise<void>;
++  getProxyStatus(): Promise<DesktopProxyStatus>;
++  openProxySettings(): Promise<string | undefined>;
+   onNotificationPermissionStatusChanged(
+     callback: (status: DesktopNotificationPermissionStatus) => void,
+   ): () => void;
+diff --git a/apps/desktop/contracts/proxy-status.ts b/apps/desktop/contracts/proxy-status.ts
+new file mode 100644
+index 0000000..9fecdf0
+--- /dev/null
++++ b/apps/desktop/contracts/proxy-status.ts
+@@ -0,0 +1,12 @@
++export interface ProxyStatusSnapshot {
++  source: "pi-settings" | "environment" | "direct";
++  httpProxy: string | null;
++  httpsProxy: string | null;
++  noProxy: string;
++  settingsPath: string;
++}
++
++export interface DesktopProxyStatus extends ProxyStatusSnapshot {
++  version: string;
++  buildLabel: string;
++}
+diff --git a/apps/desktop/electron/ipc/register-desktop-ipc.ts b/apps/desktop/electron/ipc/register-desktop-ipc.ts
+index 9816425..ebfc5da 100644
+--- a/apps/desktop/electron/ipc/register-desktop-ipc.ts
++++ b/apps/desktop/electron/ipc/register-desktop-ipc.ts
+@@ -26,6 +26,7 @@ import type { DesktopExtensionViewOwner } from "../extensions/extension-view-own
+ import { registerExtensionViewRequests } from "./extension-view-requests";
+ import { registerReviewRequests, type ReviewRequestsOwner } from "./review-requests";
+ import { mainFrameHandler } from "./main-frame-ipc";
++import type { DesktopProxyStatus } from "../../contracts/proxy-status";
+ import { assertComposerAttachmentPixels } from "./composer-attachment-pixels";
+ import {
+   expectAppView,
+@@ -165,6 +166,8 @@ export interface DesktopIpcOwners {
+ }
+ 
+ export interface DesktopIpcCapabilities {
++  readonly getProxyStatus: () => Promise<DesktopProxyStatus>;
++  readonly openProxySettings: () => Promise<string | undefined>;
+   readonly ping: () => string;
+   readonly theme: ThemeManager;
+   readonly openExternal: (url: string) => Promise<void>;
+@@ -606,6 +609,22 @@ export function registerDesktopIpc({
+     windows.windowForSender(event.sender);
+     return capabilities.notificationPermission()?.openSystemSettings() ?? Promise.resolve();
+   });
++  handleMainFrame(
++    desktopIpc.getProxyStatus,
++    () => undefined,
++    () => capabilities.getProxyStatus(),
++  );
++  handleMainFrame(
++    desktopIpc.openProxySettings,
++    () => undefined,
++    async () => {
++      try {
++        return await capabilities.openProxySettings();
++      } catch {
++        return "Could not open Pi settings. Check that the settings file is available.";
++      }
++    },
++  );
+ 
+   ipcMain.handle(desktopIpc.createSession, (event, rawInput: unknown) =>
+     run(event, () => owners.conversation.createSession(expectCreateSessionInput(rawInput))),
+diff --git a/apps/desktop/electron/main.ts b/apps/desktop/electron/main.ts
+index 8c631bd..63b781b 100644
+--- a/apps/desktop/electron/main.ts
++++ b/apps/desktop/electron/main.ts
+@@ -18,7 +18,13 @@ import path from "node:path";
+ import { pathToFileURL } from "node:url";
+ import { augmentPosixPath } from "../scripts/augment-path.cjs";
+ import { DesktopAppStore } from "./application/app-store";
+-import { initializeDesktopProxy } from "./network/desktop-proxy";
++import {
++  getDesktopProxySettingsPath,
++  getDesktopProxyStartupErrorMessage,
++  getDesktopProxyStatus,
++  initializeDesktopProxy,
++} from "./network/desktop-proxy";
++import personalBuild from "../personal-build.json";
+ import { probeCustomProviderModels } from "./network/provider-model-probe";
+ import { WindowOwner } from "./windows/window-owner";
+ import { TurnCheckpointStore } from "./workbench/checkpoint-store";
+@@ -822,11 +828,21 @@ app
+     // Configure both fetch and WebSocket before any provider runtime is created.
+     try {
+       await initializeDesktopProxy();
+-    } catch {
+-      dialog.showErrorBox(
+-        "Unable to initialize the proxy",
+-        "Check httpProxy in Pi's global settings.json and the HTTP_PROXY / HTTPS_PROXY environment variables. Proxy addresses must use http:// or https://. Correct the configuration and restart pi-gui.",
+-      );
++    } catch (error) {
++      const settingsPath = getDesktopProxySettingsPath();
++      const result = await dialog.showMessageBox({
++        type: "error",
++        title: "Unable to initialize the proxy",
++        message: getDesktopProxyStartupErrorMessage(error),
++        detail: "Correct the configuration, then start pi-gui again.",
++        buttons: settingsPath ? ["Open Pi settings", "Exit"] : ["Exit"],
++        defaultId: 0,
++        cancelId: settingsPath ? 1 : 0,
++      });
++      if (settingsPath && result.response === 0) {
++        const openError = await openProxySettings();
++        if (openError) dialog.showErrorBox("Unable to open Pi settings", openError);
++      }
+       app.exit(1);
+       return;
+     }
+@@ -1047,6 +1063,12 @@ app
+         pickWorkspace: (window) => pickWorkspaceViaDialog(window),
+         createLoginCallbacks: (window) => createRuntimeLoginCallbacks(window),
+         probeCustomProviderModels,
++        getProxyStatus: async () => ({
++          ...getDesktopProxyStatus(),
++          version: app.getVersion(),
++          buildLabel: personalBuild.label,
++        }),
++        openProxySettings,
+         notificationPermission: () => notificationPermissionService,
+         terminal: getTerminalService,
+         optionalTerminal: () => terminalService,
+@@ -1469,3 +1491,16 @@ function escapeHtml(value: string): string {
+     .replace(/"/g, "&quot;")
+     .replace(/'/g, "&#39;");
+ }
++
++async function openProxySettings(): Promise<string | undefined> {
++  const settingsPath = getDesktopProxySettingsPath();
++  if (!settingsPath) return "Pi settings are not available yet. Restart pi-gui and try again.";
++  try {
++    const result = await shell.openPath(settingsPath);
++    return result
++      ? "Could not open Pi settings. Check that settings.json exists and that your account can open it."
++      : undefined;
++  } catch {
++    return "Could not open Pi settings. Check that settings.json exists and that your account can open it.";
++  }
++}
+diff --git a/apps/desktop/electron/network/desktop-proxy.ts b/apps/desktop/electron/network/desktop-proxy.ts
+index 2445545..dad5ed5 100644
+--- a/apps/desktop/electron/network/desktop-proxy.ts
++++ b/apps/desktop/electron/network/desktop-proxy.ts
+@@ -1,6 +1,7 @@
+ import { readFile } from "node:fs/promises";
+ import { join } from "node:path";
+ import { EnvHttpProxyAgent, install, setGlobalDispatcher } from "undici";
++import type { ProxyStatusSnapshot } from "../../contracts/proxy-status";
+ 
+ export interface DesktopProxyOptions {
+   readonly httpProxy: string;
+@@ -15,11 +16,57 @@ export interface InitializeDesktopProxyOptions {
+ 
+ const INVALID_EXPLICIT_PROXY =
+   "Invalid httpProxy in Pi settings: expected a valid http:// or https:// proxy URL.";
+-const INVALID_ENV_PROXY =
+-  "Invalid proxy environment configuration: expected a valid http:// or https:// proxy URL.";
+ const SETTINGS_READ_ERROR = "Unable to read Pi proxy settings.";
+ const SETTINGS_PARSE_ERROR = "Pi proxy settings contain invalid JSON.";
+ 
++type ProxyConfigErrorKind = "explicit" | "http-env" | "https-env" | "parse" | "read" | "dispatcher";
++class DesktopProxyConfigError extends Error {
++  constructor(readonly kind: ProxyConfigErrorKind) {
++    super(
++      kind === "explicit"
++        ? INVALID_EXPLICIT_PROXY
++        : kind === "http-env"
++          ? "Invalid HTTP_PROXY environment value: expected a valid http:// or https:// proxy URL."
++          : kind === "https-env"
++            ? "Invalid HTTPS_PROXY environment value: expected a valid http:// or https:// proxy URL."
++            : kind === "parse"
++              ? SETTINGS_PARSE_ERROR
++              : kind === "read"
++                ? SETTINGS_READ_ERROR
++                : "Unable to initialize the configured proxy. Check Pi settings and proxy environment configuration.",
++    );
++    this.name = "DesktopProxyConfigError";
++  }
++}
++let effectiveStatus: ProxyStatusSnapshot | undefined;
++let configuredSettingsPath: string | undefined;
++
++export function getDesktopProxySettingsPath(): string | undefined {
++  return configuredSettingsPath;
++}
++
++export function getDesktopProxyStartupErrorMessage(error: unknown): string {
++  return error instanceof DesktopProxyConfigError
++    ? error.message
++    : "Unable to initialize proxy settings. Check Pi settings and proxy environment variables.";
++}
++
++function safeOrigin(value: string): string | null {
++  if (!value) return null;
++  try {
++    return new URL(value).origin;
++  } catch {
++    return null;
++  }
++}
++
++export function getDesktopProxyStatus(): ProxyStatusSnapshot {
++  if (!effectiveStatus) {
++    throw new Error("Desktop proxy status is unavailable before initialization completes.");
++  }
++  return effectiveStatus;
++}
++
+ function getEnvironmentValue(env: NodeJS.ProcessEnv, name: string): string | undefined {
+   // Windows environment names are case-insensitive in practice. Prefer the
+   // conventional upper-case spelling when both spellings are present.
+@@ -29,22 +76,25 @@ function getEnvironmentValue(env: NodeJS.ProcessEnv, name: string): string | und
+   return typeof value === "string" ? value.trim() || undefined : undefined;
+ }
+ 
+-function validateProxyUrl(value: string, errorMessage: string): string {
++function validateProxyUrl(value: string, kind: ProxyConfigErrorKind): string {
+   let parsed: URL;
+   try {
+     parsed = new URL(value);
+   } catch {
+-    throw new Error(errorMessage);
++    throw new DesktopProxyConfigError(kind);
+   }
+   if ((parsed.protocol !== "http:" && parsed.protocol !== "https:") || !parsed.hostname) {
+-    throw new Error(errorMessage);
++    throw new DesktopProxyConfigError(kind);
+   }
+   return value;
+ }
+ 
+-function validateEnvironmentProxy(value: string | undefined): string {
++function validateEnvironmentProxy(
++  value: string | undefined,
++  kind: "http-env" | "https-env",
++): string {
+   if (!value) return "";
+-  return validateProxyUrl(value, INVALID_ENV_PROXY);
++  return validateProxyUrl(value, kind);
+ }
+ 
+ /**
+@@ -63,11 +113,11 @@ export function resolveDesktopProxyOptions(
+     const setting = (settings as Record<string, unknown>).httpProxy;
+     if (setting !== undefined) {
+       if (typeof setting !== "string") {
+-        throw new Error(INVALID_EXPLICIT_PROXY);
++        throw new DesktopProxyConfigError("explicit");
+       }
+       const trimmed = setting.trim();
+       if (trimmed) {
+-        explicitProxy = validateProxyUrl(trimmed, INVALID_EXPLICIT_PROXY);
++        explicitProxy = validateProxyUrl(trimmed, "explicit");
+       }
+     }
+   }
+@@ -80,8 +130,14 @@ export function resolveDesktopProxyOptions(
+     };
+   }
+ 
+-  const httpEnvironmentProxy = validateEnvironmentProxy(getEnvironmentValue(env, "HTTP_PROXY"));
+-  const httpsEnvironmentProxy = validateEnvironmentProxy(getEnvironmentValue(env, "HTTPS_PROXY"));
++  const httpEnvironmentProxy = validateEnvironmentProxy(
++    getEnvironmentValue(env, "HTTP_PROXY"),
++    "http-env",
++  );
++  const httpsEnvironmentProxy = validateEnvironmentProxy(
++    getEnvironmentValue(env, "HTTPS_PROXY"),
++    "https-env",
++  );
+   return {
+     httpProxy: httpEnvironmentProxy,
+     // Undici falls back to httpProxy for HTTPS when httpsProxy is empty, which
+@@ -105,7 +161,7 @@ export function createDesktopProxyDispatcher(
+     });
+   } catch {
+     // Constructor diagnostics may echo a proxy URI, including credentials.
+-    throw new Error(INVALID_ENV_PROXY);
++    throw new DesktopProxyConfigError("dispatcher");
+   }
+ }
+ 
+@@ -117,13 +173,13 @@ async function readGlobalSettings(agentDir: string): Promise<unknown> {
+     if (error !== null && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+       return {};
+     }
+-    throw new Error(SETTINGS_READ_ERROR);
++    throw new DesktopProxyConfigError("read");
+   }
+ 
+   try {
+     return JSON.parse(content) as unknown;
+   } catch {
+-    throw new Error(SETTINGS_PARSE_ERROR);
++    throw new DesktopProxyConfigError("parse");
+   }
+ }
+ 
+@@ -133,9 +189,29 @@ export async function initializeDesktopProxy(
+ ): Promise<EnvHttpProxyAgent> {
+   const agentDir =
+     options.agentDir ?? (await import("@earendil-works/pi-coding-agent")).getAgentDir();
++  configuredSettingsPath = join(agentDir, "settings.json");
+   const settings = await readGlobalSettings(agentDir);
+-  const dispatcher = createDesktopProxyDispatcher(settings, options.env ?? process.env);
++  const env = options.env ?? process.env;
++  const resolved = resolveDesktopProxyOptions(settings, env);
++  const explicit =
++    settings !== null &&
++    typeof settings === "object" &&
++    !Array.isArray(settings) &&
++    typeof (settings as Record<string, unknown>).httpProxy === "string" &&
++    Boolean(((settings as Record<string, unknown>).httpProxy as string).trim());
++  const environment = Boolean(
++    getEnvironmentValue(env, "HTTP_PROXY") || getEnvironmentValue(env, "HTTPS_PROXY"),
++  );
++  const status: ProxyStatusSnapshot = {
++    source: explicit ? "pi-settings" : environment ? "environment" : "direct",
++    httpProxy: safeOrigin(resolved.httpProxy),
++    httpsProxy: safeOrigin(resolved.httpsProxy || resolved.httpProxy),
++    noProxy: resolved.noProxy,
++    settingsPath: configuredSettingsPath,
++  };
++  const dispatcher = createDesktopProxyDispatcher(settings, env);
+   setGlobalDispatcher(dispatcher);
+   install();
++  effectiveStatus = status;
+   return dispatcher;
+ }
+diff --git a/apps/desktop/electron/network/provider-model-probe.ts b/apps/desktop/electron/network/provider-model-probe.ts
+index 1a3334f..7811449 100644
+--- a/apps/desktop/electron/network/provider-model-probe.ts
++++ b/apps/desktop/electron/network/provider-model-probe.ts
+@@ -24,7 +24,7 @@ export async function probeCustomProviderModels(
+     if (!response.ok) {
+       return {
+         ok: false,
+-        error: `${response.status} ${response.statusText} from ${displayTarget}`,
++        error: describeHttpStatus(response.status, displayTarget),
+       };
+     }
+ 
+@@ -60,6 +60,8 @@ function redactUrlCredentials(target: string): string {
+     const url = new URL(target);
+     url.username = "";
+     url.password = "";
++    url.search = "";
++    url.hash = "";
+     return url.toString();
+   } catch {
+     return "the configured provider URL";
+@@ -72,18 +74,36 @@ function describeProbeError(error: unknown, target: string): string {
+   }
+ 
+   const code = getSafeNetworkErrorCode(error);
++  if (code === "ETIMEDOUT" || code === "ESOCKETTIMEDOUT" || code === "UND_ERR_CONNECT_TIMEOUT") {
++    return `Timed out contacting ${target}. Check the provider or proxy network and try again.`;
++  }
+   if (code === "ECONNREFUSED") {
+     return `Could not connect to ${target}. Check the provider or proxy address and try again.`;
+   }
+   if (code === "ENOTFOUND" || code === "EAI_AGAIN") {
+     return `Could not resolve the provider host for ${target}. Check the network or proxy settings and try again.`;
+   }
+-  if (code === "CERT_HAS_EXPIRED" || code === "UNABLE_TO_VERIFY_LEAF_SIGNATURE") {
++  if (
++    code === "CERT_HAS_EXPIRED" ||
++    code === "UNABLE_TO_VERIFY_LEAF_SIGNATURE" ||
++    code === "ERR_TLS_CERT_ALTNAME_INVALID" ||
++    code === "DEPTH_ZERO_SELF_SIGNED_CERT"
++  ) {
+     return `Could not verify the TLS certificate for ${target}. Check the provider or proxy certificate settings.`;
+   }
+   return `Could not reach ${target}. Check the provider URL, network, or proxy settings and try again.`;
+ }
+ 
++function describeHttpStatus(status: number, target: string): string {
++  if (status === 401 || status === 403)
++    return `${status} Authentication or permission failed at ${target}. Check the API key and provider access.`;
++  if (status === 407)
++    return `407 Proxy authentication required for ${target}. Check proxy credentials in your proxy configuration.`;
++  if (status === 429) return `429 Provider rate limit reached at ${target}. Wait and try again.`;
++  if (status >= 500) return `${status} Provider service error at ${target}. Try again later.`;
++  return `${status} Provider request failed at ${target}. Check the provider URL and settings.`;
++}
++
+ function getSafeNetworkErrorCode(error: unknown): string | undefined {
+   if (!error || typeof error !== "object") {
+     return undefined;
+@@ -110,4 +130,9 @@ const SAFE_NETWORK_ERROR_CODES = new Set([
+   "EAI_AGAIN",
+   "CERT_HAS_EXPIRED",
+   "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
++  "ERR_TLS_CERT_ALTNAME_INVALID",
++  "DEPTH_ZERO_SELF_SIGNED_CERT",
++  "ETIMEDOUT",
++  "ESOCKETTIMEDOUT",
++  "UND_ERR_CONNECT_TIMEOUT",
+ ]);
+diff --git a/apps/desktop/electron/preload.ts b/apps/desktop/electron/preload.ts
+index 6dec1c9..fb2bc03 100644
+--- a/apps/desktop/electron/preload.ts
++++ b/apps/desktop/electron/preload.ts
+@@ -25,6 +25,7 @@ import {
+   type TerminalPanelSnapshot,
+   type TerminalSize,
+ } from "../contracts/ipc";
++import type { DesktopProxyStatus } from "../contracts/proxy-status";
+ import type { ClipboardImageRead } from "../contracts/composer-attachments";
+ import type { SaveTaskWorkbenchTemplateInput, TaskWorkbenchTemplate } from "../contracts/workbench";
+ import type {
+@@ -451,6 +452,10 @@ contextBridge.exposeInMainWorld("piApp", {
+     ) as Promise<DesktopNotificationPermissionStatus>,
+   openSystemNotificationSettings: () =>
+     ipcRenderer.invoke(desktopIpc.openSystemNotificationSettings) as Promise<void>,
++  getProxyStatus: () =>
++    ipcRenderer.invoke(desktopIpc.getProxyStatus) as Promise<DesktopProxyStatus>,
++  openProxySettings: () =>
++    ipcRenderer.invoke(desktopIpc.openProxySettings) as Promise<string | undefined>,
+   onNotificationPermissionStatusChanged: (
+     callback: (status: DesktopNotificationPermissionStatus) => void,
+   ) => {
+diff --git a/apps/desktop/personal-build.json b/apps/desktop/personal-build.json
+new file mode 100644
+index 0000000..e75723b
+--- /dev/null
++++ b/apps/desktop/personal-build.json
+@@ -0,0 +1,3 @@
++{
++  "label": "proxy.2"
++}
+diff --git a/apps/desktop/src/features/settings/settings-general-section.tsx b/apps/desktop/src/features/settings/settings-general-section.tsx
+index 86ace56..63a8215 100644
+--- a/apps/desktop/src/features/settings/settings-general-section.tsx
++++ b/apps/desktop/src/features/settings/settings-general-section.tsx
+@@ -3,6 +3,7 @@ import type { RuntimeSnapshot } from "@pi-gui/session-driver/runtime-types";
+ import type { ModelSettingsScopeMode } from "../../../contracts/desktop-state";
+ import { SettingsSegmented, SettingsSwitch } from "./settings-controls";
+ import { SettingsGroup, SettingsRow } from "./settings-utils";
++import { SettingsProxyStatus } from "./settings-proxy-status";
+ 
+ interface SettingsGeneralSectionProps {
+   readonly runtime?: RuntimeSnapshot;
+@@ -84,6 +85,7 @@ export function SettingsGeneralSection({
+           />
+         </SettingsRow>
+       </SettingsGroup>
++      <SettingsProxyStatus />
+     </>
+   );
+ }
+diff --git a/apps/desktop/src/features/settings/settings-proxy-status.tsx b/apps/desktop/src/features/settings/settings-proxy-status.tsx
+new file mode 100644
+index 0000000..84b32a7
+--- /dev/null
++++ b/apps/desktop/src/features/settings/settings-proxy-status.tsx
+@@ -0,0 +1,119 @@
++import { useCallback, useEffect, useState } from "react";
++import type { DesktopProxyStatus } from "../../../contracts/proxy-status";
++import { SettingsGroup, SettingsRow } from "./settings-utils";
++
++export function SettingsProxyStatus() {
++  const [status, setStatus] = useState<DesktopProxyStatus>();
++  const [loading, setLoading] = useState(true);
++  const [error, setError] = useState<string>();
++  const [openError, setOpenError] = useState<string>();
++
++  const refresh = useCallback(async () => {
++    setLoading(true);
++    setError(undefined);
++    try {
++      const next = await window.piApp?.getProxyStatus();
++      if (!next) throw new Error("Pi settings status is unavailable.");
++      setStatus(next);
++    } catch {
++      setError("Could not read the proxy status. Restart Pi GUI and try again.");
++    } finally {
++      setLoading(false);
++    }
++  }, []);
++
++  useEffect(() => {
++    void refresh().catch(() => {
++      setError("Could not read the proxy status. Restart Pi GUI and try again.");
++      setLoading(false);
++    });
++  }, [refresh]);
++
++  const openSettings = async () => {
++    setOpenError(undefined);
++    try {
++      const failure = await window.piApp?.openProxySettings();
++      if (failure) setOpenError(failure);
++    } catch {
++      setOpenError("Could not open Pi settings. Check that settings.json is available.");
++    }
++  };
++
++  return (
++    <SettingsGroup
++      title="Pi and proxy"
++      description="This shows the proxy configuration used at startup. NO_PROXY can send matching requests directly. Proxy changes take effect after you fully quit and restart Pi GUI."
++    >
++      {loading && !status ? <p role="status">Loading Pi and proxy status…</p> : null}
++      {error ? <p role="alert">{error}</p> : null}
++      {status ? (
++        <>
++          <SettingsRow title="Personal version" description={`Build ${status.buildLabel}`}>
++            <span>{status.version}</span>
++          </SettingsRow>
++          <SettingsRow title="Proxy source">
++            <span>{sourceLabel(status.source)}</span>
++          </SettingsRow>
++          <SettingsRow title="HTTP proxy">
++            <span>{redactProxyAddress(status.httpProxy)}</span>
++          </SettingsRow>
++          <SettingsRow title="HTTPS proxy">
++            <span>{redactProxyAddress(status.httpsProxy)}</span>
++          </SettingsRow>
++          <SettingsRow title="NO_PROXY">
++            <span>{status.noProxy || "Not set"}</span>
++          </SettingsRow>
++        </>
++      ) : null}
++      <div className="settings-row">
++        <div className="settings-row__actions">
++          <button
++            className="button button--secondary"
++            type="button"
++            disabled={loading}
++            onClick={() => {
++              void refresh().catch(() =>
++                setError("Could not read the proxy status. Restart Pi GUI and try again."),
++              );
++            }}
++          >
++            Refresh status
++          </button>
++          <button
++            className="button button--secondary"
++            type="button"
++            onClick={() => {
++              void openSettings().catch(() =>
++                setOpenError("Could not open Pi settings. Check that settings.json is available."),
++              );
++            }}
++          >
++            Open Pi settings
++          </button>
++        </div>
++      </div>
++      {openError ? <p role="alert">{openError}</p> : null}
++    </SettingsGroup>
++  );
++}
++
++function sourceLabel(source: DesktopProxyStatus["source"]): string {
++  switch (source) {
++    case "pi-settings":
++      return "Pi settings";
++    case "environment":
++      return "Environment variables";
++    case "direct":
++      return "Direct connection";
++  }
++}
++
++function redactProxyAddress(value: string | null): string {
++  if (!value) return "Direct connection";
++  try {
++    const url = new URL(value);
++    return `${url.protocol}//${url.host}`;
++  } catch {
++    return "Configured proxy";
++  }
++}
+diff --git a/apps/desktop/tests/core/proxy-status.spec.ts b/apps/desktop/tests/core/proxy-status.spec.ts
+new file mode 100644
+index 0000000..c5a7128
+--- /dev/null
++++ b/apps/desktop/tests/core/proxy-status.spec.ts
+@@ -0,0 +1,176 @@
++import { writeFile } from "node:fs/promises";
++import { dirname, join, resolve } from "node:path";
++import { mkdir } from "node:fs/promises";
++import { expect, test } from "@playwright/test";
++import {
++  desktopShortcut,
++  launchDesktop,
++  launchDesktopByExecutable,
++  makeUserDataDir,
++  makeWorkspace,
++  seedAgentDir,
++  waitForWorkspaceByPath,
++} from "../helpers/electron-app";
++
++const PACKAGED = process.env.PI_PROXY_PACKAGED === "1";
++const PACKAGED_EXECUTABLE =
++  process.env.PI_PROXY_EXECUTABLE ??
++  "F:\\Apps\\pi-gui-proxy\\versions\\0.1.0-beta.40-proxy.2\\pi-gui.exe";
++
++test(`General renders the real startup proxy snapshot without exposing credentials (${PACKAGED ? "packaged" : "dev"})`, async () => {
++  const explicit = await showGeneralForSnapshot({
++    name: "proxy-status-pi-settings",
++    settings: { httpProxy: "http://synthetic-user:synthetic-password@proxy.example:3128" },
++    envOverrides: {
++      HTTP_PROXY: undefined,
++      HTTPS_PROXY: undefined,
++      http_proxy: undefined,
++      https_proxy: undefined,
++      NO_PROXY: "localhost,127.0.0.1,.example.test",
++      no_proxy: undefined,
++    },
++  });
++  try {
++    const section = explicit.section;
++    expect(explicit.identity.isPackaged).toBe(PACKAGED);
++    if (PACKAGED) {
++      expect(resolve(explicit.identity.appPath)).toBe(
++        resolve(dirname(PACKAGED_EXECUTABLE), "resources", "app.asar"),
++      );
++    } else {
++      expect(resolve(explicit.identity.appPath)).toBe(resolve("apps/desktop"));
++    }
++    const snapshot = await explicit.window.evaluate(() => window.piApp?.getProxyStatus());
++    expect(snapshot).toMatchObject({
++      source: "pi-settings",
++      httpProxy: "http://proxy.example:3128",
++      httpsProxy: "http://proxy.example:3128",
++      noProxy: "localhost,127.0.0.1,.example.test",
++    });
++    await expect(section).toContainText("Pi settings");
++    await expect(section).toContainText("http://proxy.example:3128");
++    await expect(section).toContainText("localhost,127.0.0.1,.example.test");
++    await expect(section).not.toContainText("synthetic-user");
++    await expect(section).not.toContainText("synthetic-password");
++    await expect(section).not.toContainText(explicit.settingsPath);
++    await expect(section).toContainText("proxy.2");
++    await expect(section.getByText(/^\d+\.\d+\.\d+/)).toBeVisible();
++    await expect(section).toContainText("quit and restart");
++    const screenshotPath = resolve(
++      `.artifacts/proxy-phase2/proxy-status-general-${PACKAGED ? "packaged" : "final"}.png`,
++    );
++    await mkdir(dirname(screenshotPath), { recursive: true });
++    await explicit.window.screenshot({ path: screenshotPath, fullPage: false });
++
++    // The screen refreshes the startup snapshot; edits made after launch do not
++    // hot-apply to the active process or alter the snapshot shown here.
++    await writeFile(
++      explicit.settingsPath,
++      `${JSON.stringify({ httpProxy: "http://changed.example:9000" })}\n`,
++      "utf8",
++    );
++    await section.getByRole("button", { name: "Refresh status" }).click();
++    await expect(section).toContainText("http://proxy.example:3128");
++    await expect(section).not.toContainText("changed.example");
++
++    await explicit.harness.electronApp.evaluate(({ shell }) => {
++      shell.openPath = async (filePath) => {
++        (
++          globalThis as typeof globalThis & { __proxySettingsOpenedPath?: string }
++        ).__proxySettingsOpenedPath = filePath;
++        return "";
++      };
++    });
++    await section.getByRole("button", { name: "Open Pi settings" }).click();
++    await expect(section.getByRole("alert")).toHaveCount(0);
++    await expect
++      .poll(() =>
++        explicit.harness.electronApp.evaluate(
++          () =>
++            (globalThis as typeof globalThis & { __proxySettingsOpenedPath?: string })
++              .__proxySettingsOpenedPath,
++        ),
++      )
++      .toBe(explicit.settingsPath);
++  } finally {
++    await explicit.harness.close();
++  }
++
++  const environment = await showGeneralForSnapshot({
++    name: "proxy-status-environment",
++    settings: {},
++    envOverrides: {
++      HTTP_PROXY: "http://env-user:env-password@env-proxy.example:8080",
++      HTTPS_PROXY: "https://env-secure-user:env-secure-password@env-proxy.example:8443",
++      NO_PROXY: "internal.example",
++      http_proxy: undefined,
++      https_proxy: undefined,
++      no_proxy: undefined,
++    },
++  });
++  try {
++    await expect(environment.section).toContainText("Environment variables");
++    await expect(environment.section).toContainText("http://env-proxy.example:8080");
++    await expect(environment.section).toContainText("https://env-proxy.example:8443");
++    await expect(environment.section).toContainText("internal.example");
++    await expect(environment.section).not.toContainText("env-password");
++  } finally {
++    await environment.harness.close();
++  }
++
++  const direct = await showGeneralForSnapshot({
++    name: "proxy-status-direct",
++    settings: {},
++    envOverrides: {
++      HTTP_PROXY: undefined,
++      HTTPS_PROXY: undefined,
++      http_proxy: undefined,
++      https_proxy: undefined,
++      NO_PROXY: "",
++      no_proxy: undefined,
++    },
++  });
++  try {
++    await expect(direct.section).toContainText("Direct connection");
++    await expect(direct.section.getByText("Not set")).toBeVisible();
++  } finally {
++    await direct.harness.close();
++  }
++});
++
++async function showGeneralForSnapshot(input: {
++  readonly name: string;
++  readonly settings: Record<string, unknown>;
++  readonly envOverrides: Record<string, string | undefined>;
++}) {
++  const userDataDir = await makeUserDataDir();
++  const agentDir = join(userDataDir, "agent");
++  const settingsPath = join(agentDir, "settings.json");
++  const workspacePath = await makeWorkspace(input.name);
++  await seedAgentDir(agentDir, { enabledModels: [] });
++  await writeFile(settingsPath, `${JSON.stringify(input.settings, null, 2)}\n`, "utf8");
++  const launchOptions = {
++    agentDir,
++    initialWorkspaces: [workspacePath],
++    scrubProviderEnv: true,
++    testMode: "foreground",
++    envOverrides: input.envOverrides,
++  } as const;
++  const harness = PACKAGED
++    ? await launchDesktopByExecutable(PACKAGED_EXECUTABLE, userDataDir, launchOptions)
++    : await launchDesktop(userDataDir, launchOptions);
++  const identity = await harness.electronApp.evaluate(({ app }) => ({
++    appPath: app.getAppPath(),
++    isPackaged: app.isPackaged,
++  }));
++  const window = await harness.firstWindow();
++  await waitForWorkspaceByPath(window, workspacePath);
++  await window.keyboard.press(desktopShortcut(","));
++  await expect(window.getByTestId("settings-surface")).toBeVisible();
++  await window.getByRole("button", { name: "General", exact: true }).click();
++  const section = window.locator(".settings-section", {
++    has: window.locator(".settings-section__title", { hasText: "Pi and proxy" }),
++  });
++  await expect(section.getByRole("button", { name: "Refresh status" })).toBeVisible();
++  return { harness, section, settingsPath, window, identity };
++}
+diff --git a/apps/desktop/tests/unit/desktop-proxy.spec.ts b/apps/desktop/tests/unit/desktop-proxy.spec.ts
+index 940b6cc..6fea5f2 100644
+--- a/apps/desktop/tests/unit/desktop-proxy.spec.ts
++++ b/apps/desktop/tests/unit/desktop-proxy.spec.ts
+@@ -19,11 +19,96 @@ const jiti = createJiti(__filename);
+ let createDesktopProxyDispatcher: typeof import("../../electron/network/desktop-proxy").createDesktopProxyDispatcher;
+ let initializeDesktopProxy: typeof import("../../electron/network/desktop-proxy").initializeDesktopProxy;
+ let resolveDesktopProxyOptions: typeof import("../../electron/network/desktop-proxy").resolveDesktopProxyOptions;
++let getDesktopProxyStartupErrorMessage: typeof import("../../electron/network/desktop-proxy").getDesktopProxyStartupErrorMessage;
++let getDesktopProxyStatus: typeof import("../../electron/network/desktop-proxy").getDesktopProxyStatus;
++let getDesktopProxySettingsPath: typeof import("../../electron/network/desktop-proxy").getDesktopProxySettingsPath;
+ test.beforeAll(async () => {
+-  ({ createDesktopProxyDispatcher, initializeDesktopProxy, resolveDesktopProxyOptions } =
+-    await jiti.import<typeof import("../../electron/network/desktop-proxy")>(
+-      "../../electron/network/desktop-proxy.ts",
+-    ));
++  ({
++    createDesktopProxyDispatcher,
++    initializeDesktopProxy,
++    resolveDesktopProxyOptions,
++    getDesktopProxyStartupErrorMessage,
++    getDesktopProxyStatus,
++    getDesktopProxySettingsPath,
++  } = await jiti.import<typeof import("../../electron/network/desktop-proxy")>(
++    "../../electron/network/desktop-proxy.ts",
++  ));
++});
++
++test("proxy status is unavailable until initialization succeeds", () => {
++  expect(() => getDesktopProxyStatus()).toThrow(
++    "Desktop proxy status is unavailable before initialization completes.",
++  );
++});
++
++test("startup error messages classify settings and each proxy variable without leaking values", async () => {
++  const agentDir = await mkdtemp(join(tmpdir(), "pi-gui-proxy-errors-"));
++  await writeFile(join(agentDir, "settings.json"), "{bad", "utf8");
++  const startupMessage = async (env: NodeJS.ProcessEnv) => {
++    try {
++      await initializeDesktopProxy({ agentDir, env });
++      return "did not reject";
++    } catch (error) {
++      return getDesktopProxyStartupErrorMessage(error);
++    }
++  };
++  const jsonError = await startupMessage({});
++  expect(getDesktopProxySettingsPath()).toBe(join(agentDir, "settings.json"));
++  expect(jsonError).toContain("invalid JSON");
++  expect(jsonError).not.toContain("bad");
++  await writeFile(join(agentDir, "settings.json"), "{}", "utf8");
++  expect(await startupMessage({ HTTP_PROXY: "socks5://u:pass@x" })).toContain("HTTP_PROXY");
++  expect(await startupMessage({ HTTPS_PROXY: "socks5://u:pass@x" })).toContain("HTTPS_PROXY");
++  await writeFile(
++    join(agentDir, "settings.json"),
++    JSON.stringify({ httpProxy: "socks5://private:secret@x" }),
++    "utf8",
++  );
++  const explicitError = await startupMessage({});
++  expect(explicitError).toContain("httpProxy");
++  expect(explicitError).not.toContain("secret");
++  expect(getDesktopProxyStartupErrorMessage(new Error("secret details"))).toBe(
++    "Unable to initialize proxy settings. Check Pi settings and proxy environment variables.",
++  );
++});
++
++test("proxy status reports the effective, redacted source and HTTPS fallback", async () => {
++  const agentDir = await mkdtemp(join(tmpdir(), "pi-gui-proxy-status-"));
++  await writeFile(
++    join(agentDir, "settings.json"),
++    JSON.stringify({ httpProxy: "https://user:pass@proxy.example:8443" }),
++    "utf8",
++  );
++  const dispatcher = await initializeDesktopProxy({
++    agentDir,
++    env: { HTTP_PROXY: "http://env.example:8080", NO_PROXY: ".internal" },
++  });
++  try {
++    expect(getDesktopProxyStatus()).toEqual({
++      source: "pi-settings",
++      httpProxy: "https://proxy.example:8443",
++      httpsProxy: "https://proxy.example:8443",
++      noProxy: ".internal",
++      settingsPath: join(agentDir, "settings.json"),
++    });
++  } finally {
++    await dispatcher.close();
++  }
++
++  await writeFile(join(agentDir, "settings.json"), "{}", "utf8");
++  const envDispatcher = await initializeDesktopProxy({
++    agentDir,
++    env: { HTTP_PROXY: "http://user:pass@env.example:8080", NO_PROXY: "" },
++  });
++  try {
++    expect(getDesktopProxyStatus()).toMatchObject({
++      source: "environment",
++      httpProxy: "http://env.example:8080",
++      httpsProxy: "http://env.example:8080",
++    });
++  } finally {
++    await envDispatcher.close();
++  }
+ });
+ 
+ test("resolves explicit, environment, and protocol-specific proxy configuration", () => {
+@@ -78,7 +163,31 @@ test("rejects invalid explicit/environment proxy values without echoing credenti
+   }
+   expect(() =>
+     resolveDesktopProxyOptions({}, { HTTPS_PROXY: "socks5://name:secret@proxy" }),
+-  ).toThrow("Invalid proxy environment configuration");
++  ).toThrow("HTTPS_PROXY");
++
++  for (const httpProxy of [null, 7]) {
++    let errorMessage = "";
++    try {
++      resolveDesktopProxyOptions({ httpProxy }, {});
++    } catch (error) {
++      errorMessage = getDesktopProxyStartupErrorMessage(error);
++    }
++    expect(errorMessage).toContain("Invalid httpProxy");
++    expect(errorMessage).not.toContain("Unable to initialize proxy settings");
++  }
++});
++
++test("dispatcher construction failures do not claim a specific environment variable", () => {
++  let errorMessage = "";
++  try {
++    createDesktopProxyDispatcher({ httpProxy: "http://private:secret@proxy.example/path" }, {});
++  } catch (error) {
++    errorMessage = getDesktopProxyStartupErrorMessage(error);
++  }
++  expect(errorMessage).toContain("configured proxy");
++  expect(errorMessage).not.toContain("HTTP_PROXY");
++  expect(errorMessage).not.toContain("HTTPS_PROXY");
++  expect(errorMessage).not.toContain("secret");
+ });
+ 
+ test("a local CONNECT proxy carries successive HTTP and SSE requests", async () => {
+diff --git a/apps/desktop/tests/unit/provider-model-probe.spec.ts b/apps/desktop/tests/unit/provider-model-probe.spec.ts
+index a8ec543..3c6b9e5 100644
+--- a/apps/desktop/tests/unit/provider-model-probe.spec.ts
++++ b/apps/desktop/tests/unit/provider-model-probe.spec.ts
+@@ -52,10 +52,56 @@ test("model probe validates the base URL and reports response contracts", async
+     ),
+   ).resolves.toMatchObject({
+     ok: false,
+-    error: "502 Bad Gateway from http://provider.example/v1/models",
++    error: "502 Provider service error at http://provider.example/v1/models. Try again later.",
+   });
+ });
+ 
++test("model probe gives actionable authentication, proxy, and rate-limit errors", async () => {
++  for (const [status, expected] of [
++    [401, "Authentication or permission failed"],
++    [403, "Authentication or permission failed"],
++    [407, "Proxy authentication required"],
++    [429, "Provider rate limit reached"],
++    [503, "Provider service error"],
++  ] as const) {
++    const result = await probeCustomProviderModels(
++      { baseUrl: "http://user:secret@provider.example/v1?token=hidden" },
++      async () => new Response("", { status }),
++    );
++    expect(result).toMatchObject({ ok: false });
++    if (!result.ok) {
++      expect(result.error).toContain(expected);
++      expect(result.error).not.toContain("secret");
++      expect(result.error).not.toContain("hidden");
++    }
++  }
++});
++
++test("model probe describes TLS and timeout failures without exposing nested causes", async () => {
++  for (const [name, code, expected] of [
++    ["TimeoutError", undefined, "Timed out after 5s"],
++    ["TypeError", "ERR_TLS_CERT_ALTNAME_INVALID", "Could not verify the TLS certificate"],
++    ["TypeError", "ETIMEDOUT", "Timed out contacting"],
++  ] as const) {
++    const error = Object.assign(new Error("secret-url-with-creds"), {
++      name,
++      cause: { code, message: "private details" },
++    });
++    const result = await probeCustomProviderModels(
++      { baseUrl: "http://provider.example" },
++      async () => {
++        throw error;
++      },
++    );
++    expect(result).toMatchObject({ ok: false });
++    if (!result.ok) {
++      expect(result.error).toContain(expected);
++      expect(result.error).not.toContain("secret-url");
++      expect(result.error).not.toContain("private details");
++    }
++  }
++});
++
+ test("model probe hides credentials when fetch fails", async () => {
+   const fetchImpl: typeof fetch = async () => {
+     throw new TypeError("fetch failed: http://proxy-user:proxy-secret@proxy.example:8080");
+diff --git a/docs/proxy-support.md b/docs/proxy-support.md
+index 4ce1c9a..6358519 100644
+--- a/docs/proxy-support.md
++++ b/docs/proxy-support.md
+@@ -28,7 +28,9 @@
+ 
+ `NO_PROXY`（也可用小写 `no_proxy`）在显式和环境代理下都生效，命中时绕过代理。实现采用 Undici 8.5 `EnvHttpProxyAgent` 语义：逗号或空格分隔的主机项；支持主机、子域、`.example.com` / `*.example.com` 通配符、可选 `:port`，以及单独的 `*` 全部绕过。环境值会在启动时读取为快照，运行中更改变量或 settings 文件都需重启。
+ 
+-没有 GUI 代理开关，也没有热更新。本模块不改写 `process.env`。
++没有 GUI 代理开关或热更新。本模块不改写 `process.env`。
++
++General 设置页的 **Pi and proxy** 区域只读展示应用版本与构建标签、启动时记录的代理来源、HTTP/HTTPS 代理地址和 `NO_PROXY`。Refresh 重新读取这份启动快照，不会探测 provider 连通性，也不会应用运行期间对设置或环境变量的修改；改动需完全退出并重启 pi-gui。**Open Pi settings** 打开当前用户 Pi agent 目录中的固定 `settings.json`。这一区域是配置状态展示，不是连通性诊断工具。
+ 
+ ## 覆盖范围
+ 
+@@ -40,7 +42,9 @@
+ 
+ ## Windows 目录包隔离
+ 
+-优先使用 Windows 目录包进行验证，将其保存在独立目录并使用包内的 `Start pi-gui proxy build.lnk` 快捷方式启动；不要将文件复制覆盖到官方安装目录。快捷方式调用同目录的 `Start pi-gui proxy build.cmd`，启动脚本仅将 Electron `userData` 指向 `%LOCALAPPDATA%\pi-gui-proxy-build`，保留默认 Pi agent 目录与 settings 配置。NSIS 安装器和 portable 包可能与其他安装共享应用身份，应在核对应用身份、数据目录后再考虑使用。
++个人版的日常启动入口为 `F:\Apps\pi-gui-proxy\Start pi-gui proxy.lnk`，通过固定启动器选择已部署的个人版本。版本部署与切换方式见[个人版构建与启动](personal-builds.md)。这是个人版本入口，不应将文件复制覆盖到官方安装目录。
++
++旧的独立 Windows 目录包入口 `Start pi-gui proxy build.lnk` 仅保留作历史记录；它调用同目录的 `Start pi-gui proxy build.cmd`，启动脚本仅将 Electron `userData` 指向 `%LOCALAPPDATA%\pi-gui-proxy-build`，保留默认 Pi agent 目录与 settings 配置。它不是当前个人版本的启动入口。NSIS 安装器和 portable 包可能与其他安装共享应用身份，应在核对应用身份、数据目录后再考虑使用。
+ 
+ 当前主进程将 Electron `userData` 默认设为 `pi`，可通过 `PI_APP_USER_DATA_DIR` 改到专用目录；这可隔离 pi-gui 的应用数据。Pi provider 设置、模型目录及认证由 Pi agent 目录管理，默认仍与 Pi CLI 共用 `~/.pi/agent`。如需完全隔离运行，应在启动目录包的专用快捷方式环境中设置独立 `PI_CODING_AGENT_DIR`，并在该目录建立独立 `settings.json`；不要复制认证文件。两个隔离变量都要在启动进程环境中设置。确认目标快捷方式指向独立目录包后，再进行启动验证。
+ 
+@@ -64,8 +68,8 @@ pnpm exec node scripts/package-windows.mjs --win --dir --publish never --config.
+ 
+ - Pi 0.87.1 的 `dist/auth/oauth/openai-codex.js`：`fetchWithLoginCancellation()`、`exchangeAuthorizationCode()`、`refreshAccessToken()` 分别在 85–94、112–125、127–145 行使用全局 `fetch`。
+ - Pi 0.87.1 的 `dist/api/openai-codex-responses.js`：733–736 行在非 Bun runtime 读取 `globalThis.WebSocket`，795 行创建 socket。
+-- pi-gui 的 `apps/desktop/electron/main.ts`：815–833 行在 runtime 创建前初始化代理。
++- pi-gui 的 `apps/desktop/electron/main.ts`：`app.whenReady()` 启动回调在创建 provider runtime 前初始化代理；失败时显示可打开 Pi settings 或退出的对话框。
+ - pi-gui 的 `apps/desktop/electron/network/provider-model-probe.ts`：默认 fetch 参数为 `globalThis.fetch`。
+ - pi-gui 的 `apps/desktop/electron/platform/update-checker.ts`：59 行使用 Electron `net.fetch`；`electron-builder.yml` 122–125 行声明 GitHub 发布目标，但检查器只查询 releases 并打开页面。
+-- pi-gui 的 `apps/desktop/electron/main.ts`：791–794 行将应用名设为 `pi` 并设置 `userData`，可选读取 `PI_APP_USER_DATA_DIR`。
++- pi-gui 的 `apps/desktop/electron/main.ts`：应用启动配置将应用名设为 `pi` 并设置 `userData`，可选读取 `PI_APP_USER_DATA_DIR`。
+ - Pi 0.87.1 的 `dist/config.js`：405–426 行公开的 `getAgentDir()` 使用 `PI_CODING_AGENT_DIR`，缺省目录为用户 home 下 Pi 配置目录。
+-- 
+2.54.0.windows.1
+

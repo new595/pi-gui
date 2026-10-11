@@ -1,0 +1,1039 @@
+From 6c925f73dabd0fd60c7aeef1d08f0737fb660c7f Mon Sep 17 00:00:00 2001
+From: MyHome <283594170+new595@users.noreply.github.com>
+Date: Sun, 27 Sep 2026 12:00:58 +0800
+Subject: [PATCH 1/2] feat(desktop): persist adjustable interface zoom
+
+---
+ apps/desktop/contracts/desktop-state.ts       |   7 +
+ apps/desktop/contracts/ipc.ts                 |   3 +
+ .../desktop/electron/application/app-store.ts |  32 +-
+ .../electron/ipc/register-desktop-ipc.ts      |  15 +
+ apps/desktop/electron/main.ts                 |  61 ++-
+ .../persistence/app-store-persistence.ts      |  53 ++-
+ apps/desktop/electron/preload.ts              |   2 +
+ apps/desktop/electron/windows/window-owner.ts |  10 +
+ apps/desktop/personal-build.json              |   2 +-
+ apps/desktop/src/app/secondary-surfaces.tsx   |   6 +
+ .../settings/settings-appearance-section.tsx  |  35 +-
+ .../src/features/settings/settings-view.tsx   |   7 +
+ .../desktop/tests/core/interface-zoom.spec.ts | 368 ++++++++++++++++++
+ apps/desktop/tests/core/proxy-status.spec.ts  |  12 +-
+ .../desktop/tests/unit/interface-zoom.spec.ts |  39 ++
+ 15 files changed, 638 insertions(+), 14 deletions(-)
+ create mode 100644 apps/desktop/tests/core/interface-zoom.spec.ts
+ create mode 100644 apps/desktop/tests/unit/interface-zoom.spec.ts
+
+diff --git a/apps/desktop/contracts/desktop-state.ts b/apps/desktop/contracts/desktop-state.ts
+index 60bc237..3f665ae 100644
+--- a/apps/desktop/contracts/desktop-state.ts
++++ b/apps/desktop/contracts/desktop-state.ts
+@@ -25,6 +25,11 @@ export type WorkspaceKind = "primary" | "worktree";
+ export type WorktreeStatus = "ready" | "missing" | "error";
+ export type NewThreadEnvironment = "local" | "worktree";
+ export type ThemeMode = "system" | "light" | "dark";
++export const interfaceZoomLevels = [90, 100, 110, 125, 150] as const;
++export type InterfaceZoom = (typeof interfaceZoomLevels)[number];
++export function isInterfaceZoom(value: unknown): value is InterfaceZoom {
++  return typeof value === "number" && interfaceZoomLevels.includes(value as InterfaceZoom);
++}
+ export const themePresetIds = [
+   "default",
+   "catppuccin",
+@@ -351,6 +356,7 @@ export interface DesktopAppState {
+   readonly sidebarCollapsed: boolean;
+   readonly threadGrouping: ThreadGrouping;
+   readonly enableTransparency: boolean;
++  readonly interfaceZoom: InterfaceZoom;
+   readonly startupDiagnostics: readonly StartupDiagnostic[];
+   readonly revision: number;
+   readonly lastError?: string;
+@@ -404,6 +410,7 @@ export function createEmptyDesktopAppState(): DesktopAppState {
+     sidebarCollapsed: false,
+     threadGrouping: "time",
+     enableTransparency: false,
++    interfaceZoom: 100,
+     startupDiagnostics: [],
+     revision: 0,
+   };
+diff --git a/apps/desktop/contracts/ipc.ts b/apps/desktop/contracts/ipc.ts
+index 23a1f8e..c2cca54 100644
+--- a/apps/desktop/contracts/ipc.ts
++++ b/apps/desktop/contracts/ipc.ts
+@@ -43,6 +43,7 @@ import type {
+   SelectedTranscriptRecord,
+   StartThreadInput,
+   ThemePresetId,
++  InterfaceZoom,
+   ThreadGrouping,
+   WorkspaceSessionTarget,
+   CreateScheduledTaskInput,
+@@ -143,6 +144,7 @@ export const desktopIpc = {
+   setNotificationPreferences: "pi-gui:set-notification-preferences",
+   setIntegratedTerminalShell: "pi-gui:set-integrated-terminal-shell",
+   setEnableTransparency: "pi-gui:set-enable-transparency",
++  setInterfaceZoom: "pi-gui:set-interface-zoom",
+   terminalEnsurePanel: "pi-gui:terminal-ensure-panel",
+   terminalCreateSession: "pi-gui:terminal-create-session",
+   terminalSetActiveSession: "pi-gui:terminal-set-active-session",
+@@ -678,6 +680,7 @@ export interface PiDesktopApi {
+   ): Promise<DesktopAppState>;
+   setIntegratedTerminalShell(shell: string): Promise<DesktopAppState>;
+   setEnableTransparency(enabled: boolean): Promise<DesktopAppState>;
++  setInterfaceZoom(zoom: InterfaceZoom): Promise<DesktopAppState>;
+   setThemePresetId(presetId: ThemePresetId): Promise<DesktopAppState>;
+   ensureTerminalPanel(
+     workspaceId: string,
+diff --git a/apps/desktop/electron/application/app-store.ts b/apps/desktop/electron/application/app-store.ts
+index cf6627b..f30e738 100644
+--- a/apps/desktop/electron/application/app-store.ts
++++ b/apps/desktop/electron/application/app-store.ts
+@@ -58,11 +58,13 @@ import {
+   type StartupDiagnostic,
+   type ThemeMode,
+   type ThemePresetId,
++  type InterfaceZoom,
+   type ThreadGrouping,
+   type TranscriptMessage,
+   type WorkspaceSessionTarget,
+   isThemeMode,
+   isThemePresetId,
++  isInterfaceZoom,
+   type CreateScheduledTaskInput,
+   type ScheduledTaskRecord,
+   type UpdateScheduledTaskInput,
+@@ -81,9 +83,11 @@ import { StreamingUiPublisher } from "../conversation/streaming-ui-publisher";
+ import type { RefreshStateOptions } from "./refresh-state-options";
+ import {
+   readPersistedUiState,
++  readPersistedInterfaceZoom,
+   type LegacyPersistedUiState,
+   type PersistedUiState,
+   writePersistedUiState,
++  writePersistedInterfaceZoom,
+ } from "../persistence/app-store-persistence";
+ import { AttachmentStore } from "../persistence/attachment-store";
+ import {
+@@ -224,6 +228,7 @@ export class DesktopAppStore {
+   private readonly worktreeManager: GitWorktreeManager;
+   private readonly worktreeRoot: string;
+   private readonly uiStateFilePath: string;
++  private readonly interfaceZoomFilePath: string;
+   private readonly scheduledTasksFilePath: string;
+   private scheduledTasksWritable = false;
+   private readonly attachmentStore: AttachmentStore;
+@@ -275,6 +280,7 @@ export class DesktopAppStore {
+     this.worktreeManager = new GitWorktreeManager({ catalogStorage: this.catalogStore });
+     this.worktreeRoot = join(options.userDataDir, "worktrees");
+     this.uiStateFilePath = join(options.userDataDir, "ui-state.json");
++    this.interfaceZoomFilePath = join(options.userDataDir, "interface-zoom.json");
+     this.scheduledTasksFilePath = join(options.userDataDir, "scheduled-tasks.json");
+     this.attachmentStore = new AttachmentStore(options.userDataDir);
+     this.initialWorkspacePaths = options.initialWorkspacePaths;
+@@ -1330,6 +1336,22 @@ export class DesktopAppStore {
+     return this.emit();
+   }
+ 
++  async setInterfaceZoom(interfaceZoom: InterfaceZoom): Promise<DesktopAppState> {
++    await this.initialize();
++    if (!isInterfaceZoom(interfaceZoom)) {
++      throw new Error(`Unsupported interface zoom: ${String(interfaceZoom)}`);
++    }
++    if (this.state.interfaceZoom === interfaceZoom) return structuredClone(this.state);
++    await writePersistedInterfaceZoom(this.interfaceZoomFilePath, interfaceZoom);
++    this.state = {
++      ...this.state,
++      interfaceZoom,
++      lastError: undefined,
++      revision: this.state.revision + 1,
++    };
++    return this.emit();
++  }
++
+   async setThemeMode(themeMode: ThemeMode): Promise<DesktopAppState> {
+     await this.initialize();
+     if (!isThemeMode(themeMode)) {
+@@ -3581,7 +3603,15 @@ export class DesktopAppStore {
+   }
+ 
+   private async readUiState(): Promise<LegacyPersistedUiState> {
+-    return readPersistedUiState(this.uiStateFilePath);
++    const persisted = await readPersistedUiState(this.uiStateFilePath);
++    let interfaceZoom: InterfaceZoom = 100;
++    try {
++      interfaceZoom = await readPersistedInterfaceZoom(this.interfaceZoomFilePath);
++    } catch (error) {
++      console.warn(`[app-store] could not read interface zoom; using 100%`, error);
++    }
++    this.state = { ...this.state, interfaceZoom };
++    return persisted;
+   }
+ 
+   async persistUiState(): Promise<void> {
+diff --git a/apps/desktop/electron/ipc/register-desktop-ipc.ts b/apps/desktop/electron/ipc/register-desktop-ipc.ts
+index ebfc5da..88e98e7 100644
+--- a/apps/desktop/electron/ipc/register-desktop-ipc.ts
++++ b/apps/desktop/electron/ipc/register-desktop-ipc.ts
+@@ -6,6 +6,7 @@ import type {
+   DesktopAppState,
+   WorkspaceSessionTarget,
+ } from "../../contracts/desktop-state";
++import { isInterfaceZoom } from "../../contracts/desktop-state";
+ import {
+   ComposerAttachmentLimitError,
+   type ClipboardImageRead,
+@@ -149,6 +150,7 @@ type SettingsOwner = Pick<
+   | "setNotificationPreferences"
+   | "setIntegratedTerminalShell"
+   | "setEnableTransparency"
++  | "setInterfaceZoom"
+   | "getSkillFilePath"
+   | "getExtensionFilePath"
+ >;
+@@ -594,6 +596,19 @@ export function registerDesktopIpc({
+       return state;
+     });
+   });
++  handleMainFrame(
++    desktopIpc.setInterfaceZoom,
++    (rawZoom) => {
++      if (!isInterfaceZoom(rawZoom)) throw new Error("Unsupported interface zoom");
++      return rawZoom;
++    },
++    (zoom, { window }) =>
++      windows.runUnscopedStateAction(window, async () => {
++        const state = await owners.settings.setInterfaceZoom(zoom);
++        windows.setInterfaceZoom(state.interfaceZoom);
++        return state;
++      }),
++  );
+ 
+   registerTerminalIpc(windows, capabilities);
+ 
+diff --git a/apps/desktop/electron/main.ts b/apps/desktop/electron/main.ts
+index 63b781b..dfea951 100644
+--- a/apps/desktop/electron/main.ts
++++ b/apps/desktop/electron/main.ts
+@@ -55,7 +55,12 @@ import { NotificationPermissionService } from "./platform/notification-permissio
+ import { checkForUpdate, initUpdateChecker, openReleasesPage } from "./platform/update-checker";
+ import { ThemeManager } from "./platform/theme-manager";
+ import { TerminalService } from "./platform/terminal-service";
+-import type { DesktopAppState, DesktopAppViewState } from "../contracts/desktop-state";
++import {
++  interfaceZoomLevels,
++  type DesktopAppState,
++  type DesktopAppViewState,
++  type InterfaceZoom,
++} from "../contracts/desktop-state";
+ import {
+   desktopCommands,
+   desktopIpc,
+@@ -402,6 +407,7 @@ function createWindow(): BrowserWindow {
+       sandbox: true,
+       // Keep hidden test windows responsive so Playwright exercises the same UI flows.
+       backgroundThrottling: !backgroundTestMode,
++      zoomFactor: (store?.snapshot().interfaceZoom ?? 100) / 100,
+     },
+   });
+ 
+@@ -454,6 +460,21 @@ function createWindow(): BrowserWindow {
+     }
+ 
+     const lowerKey = input.key.toLowerCase();
++    const webContentsId = window.webContents.id;
++    const terminalFocused = terminalFocusedWebContentsIds.has(webContentsId);
++    const zoomModifier = process.platform === "darwin" ? input.meta : input.control;
++    if (
++      zoomModifier &&
++      !input.alt &&
++      (!input.shift || input.key === "+") &&
++      ["0", "-", "=", "+"].includes(input.key) &&
++      !terminalFocused
++    ) {
++      event.preventDefault();
++      if (input.key === "0") setInterfaceZoomFromMenu(100);
++      else stepInterfaceZoom(input.key === "-" ? -1 : 1);
++      return;
++    }
+     const platformModifier = platformShortcutModifier(process.platform, input);
+     const command = getDesktopCommandFromShortcut({
+       modifier: platformModifier,
+@@ -462,8 +483,6 @@ function createWindow(): BrowserWindow {
+       key: input.key,
+       code: input.code,
+     });
+-    const webContentsId = window.webContents.id;
+-    const terminalFocused = terminalFocusedWebContentsIds.has(webContentsId);
+     const closeFocusedSurface =
+       isCloseFocusedSurfaceShortcut({
+         meta: input.meta,
+@@ -697,6 +716,24 @@ async function runManualUpdateCheck(): Promise<void> {
+   }
+ }
+ 
++function setInterfaceZoomFromMenu(zoom: InterfaceZoom): void {
++  void store
++    .setInterfaceZoom(zoom)
++    .then((state) => {
++      windowOwner.setInterfaceZoom(state.interfaceZoom);
++    })
++    .catch((error: unknown) => console.error("[main] interface zoom menu failed", error));
++}
++
++function stepInterfaceZoom(direction: -1 | 1): void {
++  const current = store?.snapshot().interfaceZoom ?? 100;
++  const index = interfaceZoomLevels.indexOf(current);
++  const next =
++    interfaceZoomLevels[Math.max(0, Math.min(interfaceZoomLevels.length - 1, index + direction))] ??
++    100;
++  setInterfaceZoomFromMenu(next);
++}
++
+ function installApplicationMenu(): void {
+   if (process.platform !== "darwin") {
+     return;
+@@ -773,9 +810,21 @@ function installApplicationMenu(): void {
+         },
+         { role: "toggleDevTools" },
+         { type: "separator" },
+-        { role: "resetZoom" },
+-        { role: "zoomIn" },
+-        { role: "zoomOut" },
++        {
++          label: "Reset Interface Zoom",
++          accelerator: "CommandOrControl+0",
++          click: () => setInterfaceZoomFromMenu(100),
++        },
++        {
++          label: "Zoom In",
++          accelerator: "CommandOrControl+=",
++          click: () => stepInterfaceZoom(1),
++        },
++        {
++          label: "Zoom Out",
++          accelerator: "CommandOrControl+-",
++          click: () => stepInterfaceZoom(-1),
++        },
+         { type: "separator" },
+         { role: "togglefullscreen" },
+       ],
+diff --git a/apps/desktop/electron/persistence/app-store-persistence.ts b/apps/desktop/electron/persistence/app-store-persistence.ts
+index 4281040..729213f 100644
+--- a/apps/desktop/electron/persistence/app-store-persistence.ts
++++ b/apps/desktop/electron/persistence/app-store-persistence.ts
+@@ -10,8 +10,14 @@ import type {
+   ThemeMode,
+   ThemePresetId,
+   ThreadGrouping,
++  InterfaceZoom,
++} from "../../contracts/desktop-state";
++import {
++  isInterfaceZoom,
++  isThemeMode,
++  isThemePresetId,
++  isThreadGrouping,
+ } from "../../contracts/desktop-state";
+-import { isThemeMode, isThemePresetId, isThreadGrouping } from "../../contracts/desktop-state";
+ import type { ModelSettingsSnapshot } from "@pi-gui/session-driver/runtime-types";
+ import { readJsonWithBackup, writeFileAtomicQueued } from "./atomic-file-write";
+ import { decodeAttachments } from "./attachment-store";
+@@ -152,6 +158,51 @@ export async function writePersistedUiState(
+   });
+ }
+ 
++export async function readPersistedInterfaceZoom(filePath: string): Promise<InterfaceZoom> {
++  const result = await readJsonWithBackup(filePath);
++  if (result.value === undefined) {
++    if (result.corrupted) {
++      console.warn(`[app-store] corrupt interface zoom at ${filePath}; using 100%`);
++    }
++    return 100;
++  }
++  try {
++    const zoom = decodePersistedInterfaceZoom(result.value);
++    if (result.corrupted) {
++      console.warn(`[app-store] corrupt interface zoom at ${filePath}; recovered from backup`);
++    }
++    return zoom;
++  } catch {
++    console.warn(`[app-store] invalid interface zoom at ${filePath}; using 100%`);
++    return 100;
++  }
++}
++
++export function decodePersistedInterfaceZoom(value: unknown): InterfaceZoom {
++  if (
++    typeof value !== "object" ||
++    value === null ||
++    !isInterfaceZoom((value as Record<string, unknown>).interfaceZoom)
++  ) {
++    throw new Error("Invalid persisted interface zoom");
++  }
++  return (value as Record<string, unknown>).interfaceZoom as InterfaceZoom;
++}
++
++export async function writePersistedInterfaceZoom(
++  filePath: string,
++  interfaceZoom: InterfaceZoom,
++): Promise<void> {
++  if (!isInterfaceZoom(interfaceZoom)) {
++    throw new Error(`Unsupported interface zoom: ${String(interfaceZoom)}`);
++  }
++  await writeFileAtomicQueued(
++    filePath,
++    `${JSON.stringify({ interfaceZoom }, null, 2)}\n`,
++    decodePersistedInterfaceZoom,
++  );
++}
++
+ /** Layouts are per-task conveniences: one bad layout must not block the rest of saved UI state. */
+ function decodeWorkbenchTemplates(value: unknown): Record<string, TaskWorkbenchTemplate> {
+   const records = objectRecord(value);
+diff --git a/apps/desktop/electron/preload.ts b/apps/desktop/electron/preload.ts
+index fb2bc03..f7ead65 100644
+--- a/apps/desktop/electron/preload.ts
++++ b/apps/desktop/electron/preload.ts
+@@ -380,6 +380,8 @@ contextBridge.exposeInMainWorld("piApp", {
+     ) as Promise<DesktopAppState>,
+   setEnableTransparency: (enabled: boolean) =>
+     ipcRenderer.invoke(desktopIpc.setEnableTransparency, enabled) as Promise<DesktopAppState>,
++  setInterfaceZoom: (zoom: 90 | 100 | 110 | 125 | 150) =>
++    ipcRenderer.invoke(desktopIpc.setInterfaceZoom, zoom) as Promise<DesktopAppState>,
+   setThemePresetId: (presetId: ThemePresetId) =>
+     ipcRenderer.invoke(desktopIpc.setThemePresetId, presetId) as Promise<DesktopAppState>,
+   ensureTerminalPanel: (
+diff --git a/apps/desktop/electron/windows/window-owner.ts b/apps/desktop/electron/windows/window-owner.ts
+index 9f5dbe0..b7b51f7 100644
+--- a/apps/desktop/electron/windows/window-owner.ts
++++ b/apps/desktop/electron/windows/window-owner.ts
+@@ -5,6 +5,7 @@ import type {
+   DesktopAppState,
+   DesktopAppViewState,
+   SelectedTranscriptRecord,
++  InterfaceZoom,
+ } from "../../contracts/desktop-state";
+ import { desktopIpc } from "../../contracts/ipc";
+ import { SerializedActionQueue } from "./action-queue";
+@@ -118,6 +119,15 @@ export class WindowOwner {
+     return [...this.windows];
+   }
+ 
++  setInterfaceZoom(zoom: InterfaceZoom): void {
++    const factor = zoom / 100;
++    for (const window of this.windows) {
++      if (canPublishToWindow(window) && window.webContents.getZoomFactor() !== factor) {
++        window.webContents.setZoomFactor(factor);
++      }
++    }
++  }
++
+   size(): number {
+     return this.windows.size;
+   }
+diff --git a/apps/desktop/personal-build.json b/apps/desktop/personal-build.json
+index e75723b..af4b0c6 100644
+--- a/apps/desktop/personal-build.json
++++ b/apps/desktop/personal-build.json
+@@ -1,3 +1,3 @@
+ {
+-  "label": "proxy.2"
++  "label": "proxy.3"
+ }
+diff --git a/apps/desktop/src/app/secondary-surfaces.tsx b/apps/desktop/src/app/secondary-surfaces.tsx
+index 27bacf0..eacf7de 100644
+--- a/apps/desktop/src/app/secondary-surfaces.tsx
++++ b/apps/desktop/src/app/secondary-surfaces.tsx
+@@ -426,6 +426,7 @@ export function SecondarySurfaces({
+           themeMode={snapshot.themeMode}
+           themePresetId={snapshot.themePresetId}
+           enableTransparency={snapshot.enableTransparency}
++          interfaceZoom={snapshot.interfaceZoom}
+           onLoginProvider={handleLoginProvider}
+           onSelectSection={onSelectSettingsSection}
+           onLogoutProvider={handleLogoutProvider}
+@@ -451,6 +452,11 @@ export function SecondarySurfaces({
+               },
+             );
+           }}
++          onSetInterfaceZoom={(zoom) => {
++            void updateSnapshot(setSnapshot, () => api.setInterfaceZoom(zoom)).catch(
++              (error: unknown) => console.error("[renderer] setInterfaceZoom failed", error),
++            );
++          }}
+         />
+       )}
+     </SecondarySurface>
+diff --git a/apps/desktop/src/features/settings/settings-appearance-section.tsx b/apps/desktop/src/features/settings/settings-appearance-section.tsx
+index 1eea9a1..b7f9089 100644
+--- a/apps/desktop/src/features/settings/settings-appearance-section.tsx
++++ b/apps/desktop/src/features/settings/settings-appearance-section.tsx
+@@ -1,4 +1,9 @@
+-import type { ThemeMode, ThemePresetId } from "../../../contracts/desktop-state";
++import {
++  interfaceZoomLevels,
++  type InterfaceZoom,
++  type ThemeMode,
++  type ThemePresetId,
++} from "../../../contracts/desktop-state";
+ import { SettingsSelect, SettingsSwitch } from "./settings-controls";
+ import { SettingsGroup, SettingsRow } from "./settings-utils";
+ import { themePresets } from "./theme-presets";
+@@ -10,6 +15,8 @@ interface SettingsAppearanceSectionProps {
+   readonly onSetThemePresetId: (presetId: ThemePresetId) => void;
+   readonly enableTransparency: boolean;
+   readonly onSetEnableTransparency: (enabled: boolean) => void;
++  readonly interfaceZoom: InterfaceZoom;
++  readonly onSetInterfaceZoom: (zoom: InterfaceZoom) => void;
+ }
+ 
+ const THEME_MODES: readonly { readonly mode: ThemeMode; readonly label: string }[] = [
+@@ -25,6 +32,8 @@ export function SettingsAppearanceSection({
+   onSetThemePresetId,
+   enableTransparency,
+   onSetEnableTransparency,
++  interfaceZoom,
++  onSetInterfaceZoom,
+ }: SettingsAppearanceSectionProps) {
+   const activePreset = themePresets.find((preset) => preset.id === themePresetId);
+   return (
+@@ -55,6 +64,30 @@ export function SettingsAppearanceSection({
+         </div>
+       </SettingsGroup>
+ 
++      <SettingsGroup>
++        <SettingsRow title="Interface zoom" description="Scale the entire app interface.">
++          <span className="settings-preset-control">
++            <SettingsSelect
++              label="Interface zoom"
++              options={interfaceZoomLevels.map((zoom) => ({
++                value: String(zoom),
++                label: `${zoom}%`,
++              }))}
++              value={String(interfaceZoom)}
++              onChange={(value) => onSetInterfaceZoom(Number(value) as InterfaceZoom)}
++            />
++            <button
++              className="button button--secondary"
++              disabled={interfaceZoom === 100}
++              type="button"
++              onClick={() => onSetInterfaceZoom(100)}
++            >
++              Reset to 100%
++            </button>
++          </span>
++        </SettingsRow>
++      </SettingsGroup>
++
+       <SettingsGroup>
+         <SettingsRow title="Color preset" description={activePreset?.description}>
+           <span className="settings-preset-control">
+diff --git a/apps/desktop/src/features/settings/settings-view.tsx b/apps/desktop/src/features/settings/settings-view.tsx
+index d2744e8..0d24d49 100644
+--- a/apps/desktop/src/features/settings/settings-view.tsx
++++ b/apps/desktop/src/features/settings/settings-view.tsx
+@@ -7,6 +7,7 @@ import type {
+   ModelSettingsScopeMode,
+   NotificationPreferences,
+   ThemePresetId,
++  InterfaceZoom,
+   WorkspaceRecord,
+ } from "../../../contracts/desktop-state";
+ import type {
+@@ -39,6 +40,7 @@ interface SettingsViewProps {
+   readonly themeMode: "system" | "light" | "dark";
+   readonly themePresetId: ThemePresetId;
+   readonly enableTransparency: boolean;
++  readonly interfaceZoom: InterfaceZoom;
+   readonly onSetModelSettingsScopeMode: (mode: ModelSettingsScopeMode) => void;
+   readonly onSetDefaultModel: (provider: string, modelId: string) => void;
+   readonly onSetThinkingLevel: (
+@@ -59,6 +61,7 @@ interface SettingsViewProps {
+   readonly onSetThemeMode: (mode: "system" | "light" | "dark") => void;
+   readonly onSetThemePresetId: (presetId: ThemePresetId) => void;
+   readonly onSetEnableTransparency: (enabled: boolean) => void;
++  readonly onSetInterfaceZoom: (zoom: InterfaceZoom) => void;
+ }
+ 
+ export function SettingsView({
+@@ -76,6 +79,7 @@ export function SettingsView({
+   themeMode,
+   themePresetId,
+   enableTransparency,
++  interfaceZoom,
+   onSetModelSettingsScopeMode,
+   onSetDefaultModel,
+   onSetThinkingLevel,
+@@ -94,6 +98,7 @@ export function SettingsView({
+   onSetThemeMode,
+   onSetThemePresetId,
+   onSetEnableTransparency,
++  onSetInterfaceZoom,
+ }: SettingsViewProps) {
+   const definition = settingsSectionDefinition(section);
+   const header = (
+@@ -142,6 +147,8 @@ export function SettingsView({
+               onSetThemePresetId={onSetThemePresetId}
+               enableTransparency={enableTransparency}
+               onSetEnableTransparency={onSetEnableTransparency}
++              interfaceZoom={interfaceZoom}
++              onSetInterfaceZoom={onSetInterfaceZoom}
+             />
+           ) : null}
+ 
+diff --git a/apps/desktop/tests/core/interface-zoom.spec.ts b/apps/desktop/tests/core/interface-zoom.spec.ts
+new file mode 100644
+index 0000000..831d268
+--- /dev/null
++++ b/apps/desktop/tests/core/interface-zoom.spec.ts
+@@ -0,0 +1,368 @@
++import { mkdir, readFile, writeFile } from "node:fs/promises";
++import { join } from "node:path";
++import { expect, test, type Locator, type Page } from "@playwright/test";
++import {
++  createNamedThread,
++  desktopShortcut,
++  getDesktopState,
++  launchDesktop,
++  launchDesktopByExecutable,
++  makeUserDataDir,
++  makeWorkspace,
++  seedTranscriptMessages,
++  waitForWorkspaceByPath,
++  type DesktopHarness,
++} from "../helpers/electron-app";
++
++const zoomLevels = [90, 100, 110, 125, 150] as const;
++const packagedExecutable = process.env.PI_PROXY_EXECUTABLE?.trim();
++
++async function launchZoomApp(userDataDir: string, workspacePath: string) {
++  const options = {
++    initialWorkspaces: [workspacePath],
++    testMode: "foreground" as const,
++  };
++  return packagedExecutable
++    ? launchDesktopByExecutable(packagedExecutable, userDataDir, options)
++    : launchDesktop(userDataDir, options);
++}
++
++async function setWindowSize(harness: DesktopHarness, window: Page): Promise<void> {
++  const marker = `interface-zoom-${Date.now()}-${Math.random()}`;
++  await window.evaluate((value) => {
++    Object.assign(globalThis.window, { __interfaceZoomWindowMarker: value });
++  }, marker);
++  await harness.electronApp.evaluate(async ({ BrowserWindow }, expectedMarker) => {
++    const matched = await Promise.all(
++      BrowserWindow.getAllWindows().map(async (candidate) => ({
++        candidate,
++        marker: (await candidate.webContents
++          .executeJavaScript("window.__interfaceZoomWindowMarker", true)
++          .catch(() => undefined)) as unknown,
++      })),
++    );
++    const window = matched.find((entry) => entry.marker === expectedMarker)?.candidate;
++    if (!window) throw new Error("Could not find the marked Electron window");
++    window.setSize(1280, 800);
++    const [width, height] = window.getSize();
++    if (width !== 1280 || height !== 800) {
++      throw new Error(`Expected 1280x800 Electron window, received ${width}x${height}`);
++    }
++    await window.webContents.executeJavaScript(
++      "new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))",
++    );
++  }, marker);
++}
++
++async function sendNativeShortcut(
++  harness: DesktopHarness,
++  page: Page,
++  keyCode: string,
++  modifiers: readonly ("control" | "shift" | "alt")[],
++): Promise<void> {
++  const marker = `zoom-native-key-${Date.now()}-${Math.random()}`;
++  await page.evaluate((value) => {
++    Object.assign(globalThis.window, { __interfaceZoomNativeKeyMarker: value });
++  }, marker);
++  await harness.electronApp.evaluate(async ({ BrowserWindow }, args) => {
++    const matches = await Promise.all(BrowserWindow.getAllWindows().map(async (candidate) => ({
++      candidate,
++      marker: (await candidate.webContents
++        .executeJavaScript("window.__interfaceZoomNativeKeyMarker", true)
++        .catch(() => undefined)) as unknown,
++    })));
++    const target = matches.find((entry) => entry.marker === args.marker)?.candidate;
++    if (!target) throw new Error("Could not find the marked Electron window for keyboard input");
++    target.show();
++    target.focus();
++    const keyCodes = { control: "Control", shift: "Shift", alt: "Alt" } as const;
++    const activeModifiers: string[] = [];
++    for (const modifier of args.modifiers) {
++      const modifierKey = keyCodes[modifier];
++      target.webContents.sendInputEvent({ type: "keyDown", keyCode: modifierKey });
++      activeModifiers.push(modifier);
++    }
++    target.webContents.sendInputEvent({
++      type: "keyDown",
++      keyCode: args.keyCode,
++      modifiers: activeModifiers,
++    });
++    target.webContents.sendInputEvent({
++      type: "keyUp",
++      keyCode: args.keyCode,
++      modifiers: activeModifiers,
++    });
++    for (const modifier of [...args.modifiers].reverse()) {
++      const modifierKey = keyCodes[modifier];
++      target.webContents.sendInputEvent({
++        type: "keyUp",
++        keyCode: modifierKey,
++        modifiers: activeModifiers,
++      });
++      activeModifiers.splice(activeModifiers.indexOf(modifier), 1);
++    }
++  }, { marker, keyCode, modifiers });
++}
++
++async function zoomFactorForPage(harness: DesktopHarness, page: Page): Promise<number> {
++  const marker = `zoom-read-${Date.now()}-${Math.random()}`;
++  await page.evaluate((value) => {
++    Object.assign(globalThis.window, { __interfaceZoomReadMarker: value });
++  }, marker);
++  return harness.electronApp.evaluate(async ({ BrowserWindow }, expectedMarker) => {
++    const windows = await Promise.all(
++      BrowserWindow.getAllWindows().map(async (candidate) => ({
++        candidate,
++        marker: (await candidate.webContents
++          .executeJavaScript("window.__interfaceZoomReadMarker", true)
++          .catch(() => undefined)) as unknown,
++      })),
++    );
++    const target = windows.find((entry) => entry.marker === expectedMarker)?.candidate;
++    if (!target) throw new Error("Could not find the marked Electron window");
++    return target.webContents.getZoomFactor();
++  }, marker);
++}
++
++async function expectZoom(harness: DesktopHarness, page: Page, percent: number): Promise<void> {
++  await expect
++    .poll(async () => zoomFactorForPage(harness, page), { timeout: 5_000 })
++    .toBeCloseTo(percent / 100, 2);
++  await expect.poll(async () => (await getDesktopState(page)).interfaceZoom).toBe(percent);
++}
++
++async function expectWithinViewport(locator: Locator, page: Page): Promise<void> {
++  await locator.scrollIntoViewIfNeeded();
++  const geometry = await locator.evaluate((element) => {
++    const rect = element.getBoundingClientRect();
++    return {
++      x: rect.x,
++      y: rect.y,
++      right: rect.right,
++      bottom: rect.bottom,
++      width: rect.width,
++      height: rect.height,
++      viewportWidth: window.visualViewport?.width ?? window.innerWidth,
++      viewportHeight: window.visualViewport?.height ?? window.innerHeight,
++      devicePixelRatio: window.devicePixelRatio,
++    };
++  });
++  expect(geometry.width).toBeGreaterThan(0);
++  expect(geometry.height).toBeGreaterThan(0);
++  expect(geometry.x).toBeGreaterThanOrEqual(0);
++  expect(geometry.y).toBeGreaterThanOrEqual(0);
++  expect(geometry.right).toBeLessThanOrEqual(geometry.viewportWidth);
++  expect(geometry.bottom).toBeLessThanOrEqual(geometry.viewportHeight);
++}
++
++async function captureNativeWindow(
++  harness: DesktopHarness,
++  page: Page,
++  proofDir: string,
++  name: string,
++): Promise<void> {
++  const marker = `zoom-native-${Date.now()}-${Math.random()}`;
++  const renderer = await page.evaluate((value) => {
++    Object.assign(globalThis.window, { __interfaceZoomNativeMarker: value });
++    return {
++      innerWidth: window.innerWidth,
++      innerHeight: window.innerHeight,
++      devicePixelRatio: window.devicePixelRatio,
++      visualViewport: window.visualViewport
++        ? { width: window.visualViewport.width, height: window.visualViewport.height, scale: window.visualViewport.scale }
++        : null,
++      elements: Object.fromEntries(
++        [".sidebar", '[data-testid="composer"]', '[aria-label="Interface zoom"]'].flatMap((selector) => {
++          const element = document.querySelector(selector);
++          if (!element) return [];
++          const rect = element.getBoundingClientRect();
++          return [[selector, { x: rect.x, y: rect.y, right: rect.right, bottom: rect.bottom, width: rect.width, height: rect.height }]];
++        }),
++      ),
++    };
++  }, marker);
++  const native = await harness.electronApp.evaluate(async ({ BrowserWindow }, expectedMarker) => {
++    const matches = await Promise.all(BrowserWindow.getAllWindows().map(async (candidate) => ({
++      candidate,
++      marker: (await candidate.webContents
++        .executeJavaScript("window.__interfaceZoomNativeMarker", true)
++        .catch(() => undefined)) as unknown,
++    })));
++    const target = matches.find((entry) => entry.marker === expectedMarker)?.candidate;
++    if (!target) throw new Error("Could not find the marked Electron window for native capture");
++    const image = await target.webContents.capturePage();
++    const size = image.getSize();
++    return {
++      width: size.width,
++      height: size.height,
++      zoomFactor: target.webContents.getZoomFactor(),
++      zoomLevel: target.webContents.getZoomLevel(),
++      pngBase64: image.toPNG().toString("base64"),
++    };
++  }, marker);
++  const { pngBase64, ...nativeMetadata } = native;
++  await writeFile(join(proofDir, `${name}-native.png`), Buffer.from(pngBase64, "base64"));
++  await writeFile(
++    join(proofDir, `${name}-geometry.json`),
++    JSON.stringify({ renderer, native: nativeMetadata }, null, 2),
++  );
++}
++
++async function openAppearance(window: Page): Promise<void> {
++  await window.keyboard.press(desktopShortcut(","));
++  await expect(window.getByTestId("settings-surface")).toBeVisible();
++  await window.getByRole("button", { name: "Appearance", exact: true }).click();
++  await expect(window.getByLabel("Interface zoom")).toBeVisible();
++}
++
++async function openSecondWindow(harness: DesktopHarness, source: Page): Promise<Page> {
++  const before = new Set(harness.electronApp.windows());
++  await sendNativeShortcut(harness, source, "N", ["control", "shift"]);
++  await expect.poll(() => harness.electronApp.windows().length).toBe(before.size + 1);
++  const second = harness.electronApp.windows().find((candidate) => !before.has(candidate));
++  if (!second) throw new Error("Expected the new-window shortcut to create another window");
++  await second.waitForFunction(() => Boolean(globalThis.window.piApp));
++  return second;
++}
++
++test("applies interface zoom through Appearance, shortcuts, new windows and restart", async () => {
++  test.setTimeout(120_000);
++  const userDataDir = await makeUserDataDir("pi-gui-interface-zoom-");
++  const workspacePath = await makeWorkspace("interface-zoom");
++  const proofDir = process.env.PI_APP_INTERFACE_ZOOM_PROOF_DIR?.trim();
++  if (proofDir) await mkdir(proofDir, { recursive: true });
++
++  let harness = await launchZoomApp(userDataDir, workspacePath);
++
++  try {
++    const window = await harness.firstWindow();
++    await waitForWorkspaceByPath(window, workspacePath);
++    await createNamedThread(window, "Interface zoom fixture thread");
++    await seedTranscriptMessages(harness, window, {
++      count: 3,
++      textFactory: (index) => {
++        if (index === 0) {
++          return [
++            `Fixture content ${"long message used to exercise wrapping at high zoom. ".repeat(14)}`,
++            "",
++            "```ts",
++            `const zoom = ${index};`,
++            "```",
++          ].join("\n");
++        }
++        return `Additional local fixture message ${index}: ${"layout should remain usable. ".repeat(8)}`;
++      },
++    });
++    await window.getByTestId("transcript").getByText("const zoom = 0;").waitFor();
++    await setWindowSize(harness, window);
++
++    await openAppearance(window);
++    const select = window.getByLabel("Interface zoom");
++    for (const level of zoomLevels) {
++      await select.selectOption(String(level));
++      await expectZoom(harness, window, level);
++      if (level === 125 || level === 150) {
++        await expect(select).toBeVisible();
++        await expectWithinViewport(select, window);
++        if (proofDir) {
++          await window.screenshot({
++            path: join(proofDir, `appearance-${level}.png`),
++            fullPage: true,
++          });
++          await captureNativeWindow(harness, window, proofDir, `appearance-${level}`);
++        }
++        await window.getByRole("button", { name: "Back to app" }).scrollIntoViewIfNeeded();
++        await window.getByRole("button", { name: "Back to app" }).click();
++        await expect(window.getByTestId("composer")).toBeVisible();
++        await expect(window.getByTestId("transcript")).toBeVisible();
++        if (proofDir) {
++          await window.screenshot({
++            path: join(proofDir, `workbench-${level}.png`),
++            fullPage: true,
++          });
++          await captureNativeWindow(harness, window, proofDir, `workbench-${level}`);
++        }
++        await expectWithinViewport(window.locator(".sidebar"), window);
++        await expectWithinViewport(window.getByTestId("composer"), window);
++        await openAppearance(window);
++      }
++    }
++    await expect
++      .poll(async () => {
++        const [uiState, zoomState] = await Promise.all([
++          readFile(join(userDataDir, "ui-state.json"), "utf8"),
++          readFile(join(userDataDir, "interface-zoom.json"), "utf8"),
++        ]);
++        return {
++          legacyUiStateHasZoom: Object.hasOwn(JSON.parse(uiState) as object, "interfaceZoom"),
++          interfaceZoom: (JSON.parse(zoomState) as { readonly interfaceZoom?: unknown })
++            .interfaceZoom,
++        };
++      })
++      .toEqual({ legacyUiStateHasZoom: false, interfaceZoom: 150 });
++
++    // The menu accelerators and renderer key routing must share the same state.
++    await sendNativeShortcut(harness, window, "-", ["control"]);
++    await expectZoom(harness, window, 125);
++    await sendNativeShortcut(harness, window, "-", ["control"]);
++    await expectZoom(harness, window, 110);
++    await sendNativeShortcut(harness, window, "-", ["control"]);
++    await expectZoom(harness, window, 100);
++    await sendNativeShortcut(harness, window, "-", ["control"]);
++    await expectZoom(harness, window, 90);
++    await sendNativeShortcut(harness, window, "-", ["control"]);
++    await expectZoom(harness, window, 90);
++    await window.getByRole("button", { name: "Reset to 100%" }).click();
++    await expectZoom(harness, window, 100);
++    await sendNativeShortcut(harness, window, "=", ["control", "shift"]);
++    await expectZoom(harness, window, 110);
++
++    const secondWindow = await openSecondWindow(harness, window);
++    await expectZoom(harness, secondWindow, 110);
++
++    const invalidZoomError = await window.evaluate(async () => {
++      const app = window.piApp as unknown as {
++        setInterfaceZoom(value: unknown): Promise<unknown>;
++      };
++      try {
++        await app.setInterfaceZoom("125");
++      } catch (error) {
++        return String(error);
++      }
++      return "no error";
++    });
++    expect(invalidZoomError).toMatch(/Unsupported interface zoom/);
++    await expectZoom(harness, window, 110);
++    await expectZoom(harness, secondWindow, 110);
++
++    await window.getByLabel("Interface zoom").selectOption("125");
++    await expectZoom(harness, window, 125);
++    await expectZoom(harness, secondWindow, 125);
++    await window.getByRole("button", { name: "Reset to 100%" }).click();
++    await expectZoom(harness, window, 100);
++    await expectZoom(harness, secondWindow, 100);
++  } finally {
++    await harness.close();
++  }
++
++  harness = await launchZoomApp(userDataDir, workspacePath);
++  try {
++    const window = await harness.firstWindow();
++    await waitForWorkspaceByPath(window, workspacePath);
++    await expectZoom(harness, window, 100);
++    await openAppearance(window);
++    await window.getByLabel("Interface zoom").selectOption("150");
++    await expectZoom(harness, window, 150);
++  } finally {
++    await harness.close();
++  }
++
++  harness = await launchZoomApp(userDataDir, workspacePath);
++  try {
++    const window = await harness.firstWindow();
++    await waitForWorkspaceByPath(window, workspacePath);
++    await expectZoom(harness, window, 150);
++  } finally {
++    await harness.close();
++  }
++});
+diff --git a/apps/desktop/tests/core/proxy-status.spec.ts b/apps/desktop/tests/core/proxy-status.spec.ts
+index c5a7128..4a50508 100644
+--- a/apps/desktop/tests/core/proxy-status.spec.ts
++++ b/apps/desktop/tests/core/proxy-status.spec.ts
+@@ -1,4 +1,4 @@
+-import { writeFile } from "node:fs/promises";
++import { readFile, writeFile } from "node:fs/promises";
+ import { dirname, join, resolve } from "node:path";
+ import { mkdir } from "node:fs/promises";
+ import { expect, test } from "@playwright/test";
+@@ -14,10 +14,14 @@ import {
+ 
+ const PACKAGED = process.env.PI_PROXY_PACKAGED === "1";
+ const PACKAGED_EXECUTABLE =
+-  process.env.PI_PROXY_EXECUTABLE ??
+-  "F:\\Apps\\pi-gui-proxy\\versions\\0.1.0-beta.40-proxy.2\\pi-gui.exe";
++  process.env.PI_PROXY_EXECUTABLE ?? resolve("apps/desktop/release/win-unpacked/pi-gui.exe");
+ 
+ test(`General renders the real startup proxy snapshot without exposing credentials (${PACKAGED ? "packaged" : "dev"})`, async () => {
++  const expectedLabel = (
++    JSON.parse(await readFile(resolve("apps/desktop/personal-build.json"), "utf8")) as {
++      readonly label: string;
++    }
++  ).label;
+   const explicit = await showGeneralForSnapshot({
+     name: "proxy-status-pi-settings",
+     settings: { httpProxy: "http://synthetic-user:synthetic-password@proxy.example:3128" },
+@@ -53,7 +57,7 @@ test(`General renders the real startup proxy snapshot without exposing credentia
+     await expect(section).not.toContainText("synthetic-user");
+     await expect(section).not.toContainText("synthetic-password");
+     await expect(section).not.toContainText(explicit.settingsPath);
+-    await expect(section).toContainText("proxy.2");
++    await expect(section).toContainText(expectedLabel);
+     await expect(section.getByText(/^\d+\.\d+\.\d+/)).toBeVisible();
+     await expect(section).toContainText("quit and restart");
+     const screenshotPath = resolve(
+diff --git a/apps/desktop/tests/unit/interface-zoom.spec.ts b/apps/desktop/tests/unit/interface-zoom.spec.ts
+new file mode 100644
+index 0000000..c333017
+--- /dev/null
++++ b/apps/desktop/tests/unit/interface-zoom.spec.ts
+@@ -0,0 +1,39 @@
++import { mkdtemp, readFile, writeFile } from "node:fs/promises";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++import { expect, test } from "@playwright/test";
++import { interfaceZoomLevels, isInterfaceZoom } from "../../contracts/desktop-state";
++import {
++  decodePersistedInterfaceZoom,
++  readPersistedInterfaceZoom,
++  writePersistedInterfaceZoom,
++} from "../../electron/persistence/app-store-persistence";
++
++test("accepts only supported interface zoom percentages", async () => {
++  for (const level of interfaceZoomLevels) {
++    expect(isInterfaceZoom(level)).toBe(true);
++  }
++
++  for (const value of [Number.NaN, Number.POSITIVE_INFINITY, "100", 115, 200, null]) {
++    expect(isInterfaceZoom(value)).toBe(false);
++    expect(() => decodePersistedInterfaceZoom({ interfaceZoom: value })).toThrow(
++      "Invalid persisted interface zoom",
++    );
++  }
++
++  const userDataDir = await mkdtemp(join(tmpdir(), "pi-gui-interface-zoom-state-"));
++  const sidecarPath = join(userDataDir, "interface-zoom.json");
++  expect(await readPersistedInterfaceZoom(sidecarPath)).toBe(100);
++  for (const level of interfaceZoomLevels) {
++    await writePersistedInterfaceZoom(sidecarPath, level);
++    expect(await readPersistedInterfaceZoom(sidecarPath)).toBe(level);
++  }
++
++  for (const value of ["100", 115, 200, null]) {
++    await writeFile(sidecarPath, JSON.stringify({ interfaceZoom: value }), "utf8");
++    expect(await readPersistedInterfaceZoom(sidecarPath)).toBe(100);
++  }
++  await writeFile(sidecarPath, JSON.stringify({ interfaceZoom: 115 }), "utf8");
++  expect(await readPersistedInterfaceZoom(sidecarPath)).toBe(100);
++  await expect(readFile(sidecarPath, "utf8")).resolves.toContain('"interfaceZoom":115');
++});
+-- 
+2.54.0.windows.1
+

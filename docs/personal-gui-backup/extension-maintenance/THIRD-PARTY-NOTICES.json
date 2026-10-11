@@ -1,0 +1,33 @@
+[
+  {
+    "name": "@4fu/pi-pwsh",
+    "license": "MIT",
+    "licenseRetrievedFromVersion": "0.11.0",
+    "repository": {
+      "type": "git",
+      "url": "git+https://github.com/4fuu/pi-pwsh.git"
+    },
+    "licenseFile": "extension-maintenance/licenses/4fu-pi-pwsh.LICENSE"
+  },
+  {
+    "name": "pi-subagents",
+    "license": "MIT",
+    "licenseRetrievedFromVersion": "0.77.0",
+    "repository": {
+      "type": "git",
+      "url": "git+https://github.com/nicobailon/pi-subagents.git"
+    },
+    "licenseFile": "extension-maintenance/licenses/pi-subagents.LICENSE"
+  },
+  {
+    "name": "@juicesharp/rpiv-ask-user-question",
+    "license": "MIT",
+    "licenseRetrievedFromVersion": "2.12.0",
+    "repository": {
+      "type": "git",
+      "url": "git+https://github.com/juicesharp/rpiv-mono.git",
+      "directory": "packages/rpiv-ask-user-question"
+    },
+    "licenseFile": "extension-maintenance/licenses/juicesharp-rpiv-ask-user-question.LICENSE"
+  }
+]

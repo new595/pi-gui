@@ -1,0 +1,15 @@
+node_modules/
+runs/
+transactions/
+smoke-data/
+offline-output/
+*.asar
+*.exe
+*.lnk
+*.jsonl
+auth.json
+settings.json
+models.json
+.env*
+!**/*.js
+!**/*.mjs

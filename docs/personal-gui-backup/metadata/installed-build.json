@@ -1,0 +1,11 @@
+{
+  "id": "1.0.1-proxy.4",
+  "appVersion": "1.0.1",
+  "buildLabel": "proxy.4",
+  "source": "apps/desktop/release-proxy4-final/win-unpacked",
+  "sourceCommit": "c4317cfbce2e1a6e16da51d686d2f6f75b4d00f6",
+  "baselineCommit": "dd5708fb61a38b5012d0ab149b62054d02c1c72f",
+  "bundleHash": "c084a35a4ccd93102c78f966f1a0ff5e26cb080a49a5b6998a36d712704b9004",
+  "observedOn": "2026-10-11",
+  "archiveNotIncluded": true
+}

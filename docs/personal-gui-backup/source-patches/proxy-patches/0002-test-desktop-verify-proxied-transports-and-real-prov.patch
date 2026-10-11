@@ -1,0 +1,1273 @@
+From 349bf5d341c40ccf62077e5a763133238456f671 Mon Sep 17 00:00:00 2001
+From: MyHome <283594170+new595@users.noreply.github.com>
+Date: Fri, 25 Sep 2026 18:14:16 +0800
+Subject: [PATCH 2/3] test(desktop): verify proxied transports and real
+ provider conversations
+
+---
+ apps/desktop/tests/core/proxy-support.spec.ts |  65 ++
+ .../tests/fixtures/proxy/localhost-cert.pem   |  18 +
+ .../tests/fixtures/proxy/localhost-key.pem    |  28 +
+ apps/desktop/tests/helpers/proxy-fixture.ts   |  89 +++
+ .../desktop/tests/helpers/proxy-tls-child.mjs |  57 ++
+ apps/desktop/tests/live/proxy-live.spec.ts    | 601 ++++++++++++++++++
+ apps/desktop/tests/unit/desktop-proxy.spec.ts | 264 ++++++++
+ .../tests/unit/provider-model-probe.spec.ts   |  73 +++
+ 8 files changed, 1195 insertions(+)
+ create mode 100644 apps/desktop/tests/core/proxy-support.spec.ts
+ create mode 100644 apps/desktop/tests/fixtures/proxy/localhost-cert.pem
+ create mode 100644 apps/desktop/tests/fixtures/proxy/localhost-key.pem
+ create mode 100644 apps/desktop/tests/helpers/proxy-fixture.ts
+ create mode 100644 apps/desktop/tests/helpers/proxy-tls-child.mjs
+ create mode 100644 apps/desktop/tests/live/proxy-live.spec.ts
+ create mode 100644 apps/desktop/tests/unit/desktop-proxy.spec.ts
+ create mode 100644 apps/desktop/tests/unit/provider-model-probe.spec.ts
+
+diff --git a/apps/desktop/tests/core/proxy-support.spec.ts b/apps/desktop/tests/core/proxy-support.spec.ts
+new file mode 100644
+index 0000000..5c4a3ca
+--- /dev/null
++++ b/apps/desktop/tests/core/proxy-support.spec.ts
+@@ -0,0 +1,65 @@
++import { createServer } from "node:http";
++import { writeFile } from "node:fs/promises";
++import { join } from "node:path";
++import { expect, test } from "@playwright/test";
++import {
++  desktopShortcut,
++  launchDesktop,
++  makeUserDataDir,
++  makeWorkspace,
++  seedAgentDir,
++} from "../helpers/electron-app";
++import { listenLoopback, startLocalConnectProxy } from "../helpers/proxy-fixture";
++
++test("custom endpoint Detect models reaches its local HTTP server through the configured proxy", async () => {
++  const origin = createServer((_request, response) => {
++    response.writeHead(200, { "content-type": "application/json" });
++    response.end(JSON.stringify({ data: [{ id: "proxy-detected-model" }] }));
++  });
++  const baseUrl = `${await listenLoopback(origin)}/v1`;
++  const proxy = await startLocalConnectProxy();
++  const userDataDir = await makeUserDataDir();
++  const agentDir = join(userDataDir, "agent");
++  const workspacePath = await makeWorkspace("proxy-model-detection-workspace");
++  await seedAgentDir(agentDir, { enabledModels: [] });
++  await writeFile(
++    join(agentDir, "settings.json"),
++    `${JSON.stringify({ httpProxy: proxy.url }, null, 2)}\n`,
++    "utf8",
++  );
++  const harness = await launchDesktop(userDataDir, {
++    agentDir,
++    initialWorkspaces: [workspacePath],
++    scrubProviderEnv: true,
++    testMode: "background",
++    envOverrides: {
++      HTTP_PROXY: undefined,
++      HTTPS_PROXY: undefined,
++      NO_PROXY: "",
++      no_proxy: "",
++    },
++  });
++  try {
++    const window = await harness.firstWindow();
++    await window.keyboard.press(desktopShortcut(","));
++    await expect(window.getByTestId("settings-surface")).toBeVisible();
++    await window.getByRole("button", { name: "Providers", exact: true }).click();
++    const customEndpoints = window.locator(".settings-section", {
++      has: window.locator(".settings-section__title", { hasText: "Custom endpoints" }),
++    });
++    await customEndpoints.getByRole("button", { name: "Add endpoint", exact: true }).click();
++    const dialog = window.getByTestId("custom-endpoint-dialog");
++    await dialog.getByLabel("Provider ID").fill("proxy-test");
++    await dialog.getByLabel("Base URL").fill(baseUrl);
++    await dialog.getByLabel("API key").fill("fixture-key");
++    await dialog.getByRole("button", { name: "Detect models", exact: true }).click();
++    await expect(dialog.locator(".custom-endpoint-model-list")).toContainText(
++      "proxy-detected-model",
++    );
++    expect(proxy.tunnels()).toBeGreaterThan(0);
++  } finally {
++    await harness.close();
++    await proxy.close();
++    await new Promise<void>((resolve) => origin.close(() => resolve()));
++  }
++});
+diff --git a/apps/desktop/tests/fixtures/proxy/localhost-cert.pem b/apps/desktop/tests/fixtures/proxy/localhost-cert.pem
+new file mode 100644
+index 0000000..53064a2
+--- /dev/null
++++ b/apps/desktop/tests/fixtures/proxy/localhost-cert.pem
+@@ -0,0 +1,18 @@
++-----BEGIN CERTIFICATE-----
++MIIC7DCCAdSgAwIBAgIIIpNM+SEdPG0wDQYJKoZIhvcNAQELBQAwFDESMBAGA1UE
++AxMJbG9jYWxob3N0MB4XDTI2MDkyNDA1MDUzNVoXDTMxMDkyNTA1MDUzNVowFDES
++MBAGA1UEAxMJbG9jYWxob3N0MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKC
++AQEA5DT1NRPlgwcop1iCJycmZrLkEMHnM3+LIIHedFy9pDg8er4lDC9uThG1QCaq
++cBDAttpsfSPwnZ21II3zZFK9nI1zlb+sIhGyNChjpHc1tUWR039yhRKmwyv+VDzy
++de8UnQyqifPEzL6We3N3tNGDKb4lmiQVffbc4W31atx1mg5znrYXuZJTdR5kBggo
++TE+1V4a67q58qbrEDqawMElN1iI9xp0yigfcPBNi8BvMMSrmLGbF0ElDBvfCEQVp
++Qpy7/PK4QdoZ/6XEx3x3Z55qGHNlOz8yjTJdbIhK11kg1iPGZTeMpPeF4vpN/eHA
++o+jDEzxG2F2/rvxUm+y+lJYltQIDAQABo0IwQDAaBgNVHREEEzARgglsb2NhbGhv
++c3SHBH8AAAEwEgYDVR0TAQH/BAgwBgEB/wIBATAOBgNVHQ8BAf8EBAMCAqQwDQYJ
++KoZIhvcNAQELBQADggEBANvHKlOkNpmmOKncei3mrVW8BPohYK7yaKZnggo8IxQm
++XL45fhKvyfNsHUHhi4jBHrIX6O+VFTjrQO7RdPax30ZszWETHKu/JnXvdp9Sw15M
++nHHGbFLwB3IfTJf1iMfpJPEuuAolrZWNIJjJW+3D6g72tl+3FIWSwIzjOTuh+XdQ
++wnDjZTNrkbTGfONJfklUqbjKNDs8GMgiUzyesJCan+9si+JTBABcJQaJ0nUs2NDW
++EIH7VenyCaBG8g4EssjX/OyTR+JY2DPuhdfRQpZ0YvSEqDy3CcOUJngOWtY8EdwC
++ngZ62rPJVyjgr9svmh19yooKZ3R5iDeJOeBTWy0PUl4=
++-----END CERTIFICATE-----
+\ No newline at end of file
+diff --git a/apps/desktop/tests/fixtures/proxy/localhost-key.pem b/apps/desktop/tests/fixtures/proxy/localhost-key.pem
+new file mode 100644
+index 0000000..122fbb9
+--- /dev/null
++++ b/apps/desktop/tests/fixtures/proxy/localhost-key.pem
+@@ -0,0 +1,28 @@
++-----BEGIN PRIVATE KEY-----
++MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQDkNPU1E+WDByin
++WIInJyZmsuQQweczf4sggd50XL2kODx6viUML25OEbVAJqpwEMC22mx9I/CdnbUg
++jfNkUr2cjXOVv6wiEbI0KGOkdzW1RZHTf3KFEqbDK/5UPPJ17xSdDKqJ88TMvpZ7
++c3e00YMpviWaJBV99tzhbfVq3HWaDnOethe5klN1HmQGCChMT7VXhrrurnypusQO
++prAwSU3WIj3GnTKKB9w8E2LwG8wxKuYsZsXQSUMG98IRBWlCnLv88rhB2hn/pcTH
++fHdnnmoYc2U7PzKNMl1siErXWSDWI8ZlN4yk94Xi+k394cCj6MMTPEbYXb+u/FSb
++7L6UliW1AgMBAAECggEBAKZ1apc42CTnR+QpT2a3y+8Fdg4zIi4STq17jYRbUYlD
++6/msUOG+hzsy936/tXrg/XFjidcOLCkMLF5+rJb1M5HKLBGDKk//kHkzLNt+iRKc
++mG4pfKNMo4+hu3Y+rq0Po32bC5ps0ZR3QNTzuNGQMZh1NoBk6bhkJWHaDzXPcYjY
++uLoJbdbgYPTxv2rWwfwo9CJexfcHoeJHCRDKteqCwJcg9zAhTOTxvawn/uY0N60V
++oz9o7QAzK+/8TGTjDU2ppUhUow9MZwSmsebO08Zcml/gUoG7+ZtDX4IzuZcjztBZ
++YBZYOTLdOKawIIH1xnwQMqM9niMhSrixJpvmywj2P1ECgYEA5gnjleCEgrzlOGN+
++S/P1UdJEvnTjLae9SxVTQ+8k848KEAic9c+SvqXJMw+joA28DA94JYbHnYgjo+oX
++k6a3zZX860nDfBfShukq94NqZDwDKqw98aMRnjqJwPUA+gpdIQdYay1JiLJ38VYC
++r8xJC8has2y+yFT/44qxTpUVyosCgYEA/fYlmWM/xP7P0i2ypDp6DBAieXTb3Ky6
++/GQ3hLtdkopDAgQ3OAvtl/Q2CPx+GI2F8R0EUrzgwQwN/qg6W/TWzJbutrEaSe4t
++jzzuHVlv7tTG13n01UH4KThGUiHDi4QJZA5gmbqQWGDaECEkycIaYOJNreR67S/7
++CBmJM2DlGL8CgYBJxj4g4QJeU2pH7VCh1zmD5iV5107MY5FHtS0hCl8VZXhasAh2
++pP1w+wZNw+Q7/muiiouDrXfzQ6f6d6bcCYnE+ydD5kI1WAaCkeDfxFuojb6OPvMW
++va92yVtIcMrBZfV8FDj9FmcQ2fuxgF4YNzHt/3FnPabp5Ki0NtSqWRHGBQKBgQDH
++xbYD+Ae0zgDqw5nQCFPzY0nLIvrEl3erjKYDmmPcHzjgwDIzu2ZV7vwGi6Ahbkpb
++xcid0Qg3s2Ta2ri1l17UpzH2slAMsfhSwcpJeg5L4ELeQ4gtrWwp+KOQfhDVkbLV
++a13f79sWOnGu2HOY5kBb0Ajs7lsoc2LUF0pPCTyN/wKBgHyJZw8IfCzFiSDIWL74
++GwuhZxdLtjRn9PSndnfBTYKZtmgpMhTYHs6SQiY5wpjQnaLNI9XOTD6U0fsEsa49
++puQs0ion4JQtwqihw1X3PINSDPrSN9qNbhQ+BlNEIh4xvk2vGYfIBF4RtmWOyToP
++g26fC2ChxZTegAWY+KZMzYDk
++-----END PRIVATE KEY-----
+\ No newline at end of file
+diff --git a/apps/desktop/tests/helpers/proxy-fixture.ts b/apps/desktop/tests/helpers/proxy-fixture.ts
+new file mode 100644
+index 0000000..738701e
+--- /dev/null
++++ b/apps/desktop/tests/helpers/proxy-fixture.ts
+@@ -0,0 +1,89 @@
++import { createServer, type Server } from "node:http";
++import { connect, type AddressInfo, type Server as NetServer, type Socket } from "node:net";
++import { execFile } from "node:child_process";
++import { promisify } from "node:util";
++
++const execFileAsync = promisify(execFile);
++
++export async function runNodeWithTrustedTestCertificate(
++  helperPath: string,
++  args: readonly string[],
++  certificatePath: string,
++): Promise<{ readonly stdout: string; readonly stderr: string }> {
++  return execFileAsync(process.execPath, [helperPath, ...args], {
++    cwd: process.cwd(),
++    env: { ...process.env, NODE_EXTRA_CA_CERTS: certificatePath },
++    timeout: 15_000,
++    windowsHide: true,
++  });
++}
++
++export interface LocalConnectProxy {
++  readonly url: string;
++  readonly tunnels: () => number;
++  close(): Promise<void>;
++}
++
++/** A real loopback HTTP forward proxy that establishes CONNECT tunnels. */
++export async function startLocalConnectProxy(): Promise<LocalConnectProxy> {
++  let tunnelCount = 0;
++  const sockets = new Set<Socket>();
++  const proxy: Server = createServer((_request, response) => {
++    response.writeHead(501);
++    response.end("Only CONNECT is supported by this fixture");
++  });
++  proxy.on("connection", (socket) => {
++    sockets.add(socket);
++    socket.once("close", () => sockets.delete(socket));
++  });
++  proxy.on("connect", (request, client, head) => {
++    const separator = request.url?.lastIndexOf(":") ?? -1;
++    const hostname = request.url?.slice(0, separator);
++    const port = Number(request.url?.slice(separator + 1));
++    if (!hostname || !Number.isInteger(port) || port < 1 || port > 65535) {
++      client.end("HTTP/1.1 400 Bad Request\r\n\r\n");
++      return;
++    }
++    const upstream = connect(port, hostname);
++    sockets.add(upstream);
++    upstream.once("close", () => sockets.delete(upstream));
++    upstream.once("connect", () => {
++      tunnelCount += 1;
++      client.write("HTTP/1.1 200 Connection Established\r\n\r\n");
++      if (head.length) upstream.write(head);
++      client.pipe(upstream);
++      upstream.pipe(client);
++    });
++    upstream.once("error", () => client.destroy());
++  });
++  await new Promise<void>((resolve, reject) => {
++    proxy.once("error", reject);
++    proxy.listen(0, "127.0.0.1", () => {
++      proxy.off("error", reject);
++      resolve();
++    });
++  });
++  const address = proxy.address() as AddressInfo;
++  return {
++    url: `http://127.0.0.1:${address.port}`,
++    tunnels: () => tunnelCount,
++    close: async () => {
++      for (const socket of sockets) socket.destroy();
++      await new Promise<void>((resolve, reject) => {
++        proxy.close((error) => (error ? reject(error) : resolve()));
++      });
++    },
++  };
++}
++
++export async function listenLoopback(server: NetServer): Promise<string> {
++  await new Promise<void>((resolve, reject) => {
++    server.once("error", reject);
++    server.listen(0, "127.0.0.1", () => {
++      server.off("error", reject);
++      resolve();
++    });
++  });
++  const address = server.address() as AddressInfo;
++  return `http://127.0.0.1:${address.port}`;
++}
+diff --git a/apps/desktop/tests/helpers/proxy-tls-child.mjs b/apps/desktop/tests/helpers/proxy-tls-child.mjs
+new file mode 100644
+index 0000000..77fa653
+--- /dev/null
++++ b/apps/desktop/tests/helpers/proxy-tls-child.mjs
+@@ -0,0 +1,57 @@
++import { mkdtemp, rm, writeFile } from "node:fs/promises";
++import { tmpdir } from "node:os";
++import path from "node:path";
++import { createJiti } from "jiti";
++
++const [httpProxy, httpsProxy, plainUrl, secureUrl, websocketUrl] = process.argv.slice(2);
++if (!httpProxy || !httpsProxy || !plainUrl || !secureUrl || !websocketUrl) {
++  throw new Error("The proxy TLS child requires both proxies and all three local URLs.");
++}
++
++const source = path.resolve("apps/desktop/electron/network/desktop-proxy.ts");
++const jiti = createJiti(source);
++const { createDesktopProxyDispatcher, initializeDesktopProxy } = await jiti.import(source);
++const { fetch } = await import("undici");
++
++const dispatcher = createDesktopProxyDispatcher(
++  {},
++  { HTTP_PROXY: httpProxy, HTTPS_PROXY: httpsProxy, NO_PROXY: "" },
++);
++try {
++  const plainResponse = await fetch(plainUrl, { dispatcher });
++  if ((await plainResponse.text()) !== "http-through-proxy") {
++    throw new Error("HTTP fixture response mismatch.");
++  }
++  const secureResponse = await fetch(secureUrl, { dispatcher });
++  if ((await secureResponse.text()) !== "tls-through-proxy") {
++    throw new Error("HTTPS fixture response mismatch.");
++  }
++} finally {
++  await dispatcher.close();
++}
++
++const agentDir = await mkdtemp(path.join(tmpdir(), "pi-gui-proxy-wss-"));
++try {
++  await writeFile(path.join(agentDir, "settings.json"), JSON.stringify({ httpProxy: httpsProxy }));
++  const installed = await initializeDesktopProxy({ agentDir, env: { NO_PROXY: "" } });
++  try {
++    const socket = new WebSocket(websocketUrl);
++    const closed = new Promise((resolve) =>
++      socket.addEventListener("close", resolve, { once: true }),
++    );
++    const message = await new Promise((resolve, reject) => {
++      socket.addEventListener("message", (event) => resolve(String(event.data)), { once: true });
++      socket.addEventListener("error", () => reject(new Error("WSS fixture connection failed.")), {
++        once: true,
++      });
++    });
++    if (message !== "ok") throw new Error("WSS fixture message mismatch.");
++    await closed;
++  } finally {
++    await installed.destroy();
++  }
++} finally {
++  await rm(agentDir, { recursive: true, force: true });
++}
++
++process.stdout.write("HTTP, HTTPS, and WSS proxy fixtures passed\n");
+diff --git a/apps/desktop/tests/live/proxy-live.spec.ts b/apps/desktop/tests/live/proxy-live.spec.ts
+new file mode 100644
+index 0000000..c061963
+--- /dev/null
++++ b/apps/desktop/tests/live/proxy-live.spec.ts
+@@ -0,0 +1,601 @@
++import { createServer, connect, type Socket } from "node:net";
++import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
++import { tmpdir } from "node:os";
++import { join, resolve } from "node:path";
++import { expect, test, type Page } from "@playwright/test";
++import {
++  launchDesktop,
++  launchDesktopByExecutable,
++  type DesktopHarness,
++} from "../helpers/electron-app";
++
++type TunnelRecord = {
++  target: string;
++  status: number;
++  clientBytes: number;
++  proxyBytes: number;
++};
++
++type ProxyRelay = {
++  readonly url: string;
++  readonly records: TunnelRecord[];
++  close(): Promise<void>;
++};
++
++type NetworkEvidence = {
++  webSocket: {
++    constructed: number;
++    opened: number;
++    messages: number;
++    sent: number;
++    closed: number;
++    forcedFailures: number;
++  };
++  fetch: {
++    count: number;
++    sseFrameCount: number;
++    responses: Array<{ status: number; contentType: string; sseFrames: number }>;
++  };
++};
++
++const REAL_AUTH_ENABLED = process.env.PI_APP_REAL_AUTH === "1";
++const AUTH_SOURCE_DIR = process.env.PI_APP_REAL_AUTH_SOURCE_DIR?.trim();
++const PROVIDER = process.env.PI_GUI_PROVIDER?.trim() || "openai-codex";
++const MODEL = process.env.PI_GUI_MODEL?.trim() || "gpt-6-luna";
++const PACKAGED = process.env.PI_PROXY_PACKAGED === "1";
++const SHELL_PATH = process.env.PI_PROXY_SHELL_PATH?.trim();
++const DESKTOP_DIR = resolve(__dirname, "../..");
++const REPO_ROOT = resolve(DESKTOP_DIR, "../..");
++
++test.describe("live proxy verification", () => {
++  test.describe.configure({ mode: "serial" });
++
++  test.beforeEach(({}, testInfo) => {
++    testInfo.setTimeout(300_000);
++    if (!REAL_AUTH_ENABLED || !AUTH_SOURCE_DIR) {
++      testInfo.skip(
++        !REAL_AUTH_ENABLED,
++        "Set PI_APP_REAL_AUTH=1 and PI_APP_REAL_AUTH_SOURCE_DIR to run real-provider proxy verification.",
++      );
++    }
++    if (!AUTH_SOURCE_DIR) {
++      throw new Error("PI_APP_REAL_AUTH=1 requires PI_APP_REAL_AUTH_SOURCE_DIR.");
++    }
++  });
++
++  test("real WebSocket conversation, follow-up and echo tool use go through the proxy", async () => {
++    await runProxyConversation({ forceWebSocketFailure: false });
++  });
++
++  test("a failed WebSocket construction falls back to real SSE through the proxy", async () => {
++    await runProxyConversation({ forceWebSocketFailure: true });
++  });
++});
++
++async function runProxyConversation(options: { forceWebSocketFailure: boolean }): Promise<void> {
++  const info = test.info();
++  const evidenceDir = info.outputPath();
++  await mkdir(evidenceDir, { recursive: true });
++
++  const privateRoot = await mkdtemp(join(tmpdir(), "pi-gui-proxy-private-"));
++  await chmod(privateRoot, 0o700);
++  const profile = join(privateRoot, "profile");
++  const agentDir = join(privateRoot, "agent");
++  const workspace = join(privateRoot, "workspace");
++  await mkdir(agentDir, { recursive: true, mode: 0o700 });
++  await mkdir(workspace, { recursive: true, mode: 0o700 });
++
++  const sourceDir = AUTH_SOURCE_DIR;
++  if (!sourceDir) throw new Error("Real provider auth source is unavailable.");
++  if (!SHELL_PATH) throw new Error("PI_PROXY_SHELL_PATH must point to a usable Bash executable.");
++  const sourceAuth = JSON.parse(await readFile(join(sourceDir, "auth.json"), "utf8")) as Record<
++    string,
++    unknown
++  >;
++  const selectedCredentials = sourceAuth[PROVIDER];
++  if (!selectedCredentials) {
++    throw new Error(`No saved credentials for selected provider ${PROVIDER}.`);
++  }
++  await writeFile(
++    join(agentDir, "auth.json"),
++    `${JSON.stringify({ [PROVIDER]: selectedCredentials })}\n`,
++    { mode: 0o600 },
++  );
++
++  const relay = await startConnectRelay();
++  await writeFile(
++    join(agentDir, "settings.json"),
++    `${JSON.stringify(
++      {
++        defaultProvider: PROVIDER,
++        defaultModel: MODEL,
++        defaultThinkingLevel: "off",
++        enabledModels: [`${PROVIDER}/${MODEL}`],
++        httpProxy: relay.url,
++        shellPath: SHELL_PATH,
++      },
++      null,
++      2,
++    )}\n`,
++    { mode: 0o600 },
++  );
++
++  let harness: DesktopHarness | undefined;
++  let traceStarted = false;
++  const evidence: NetworkEvidence = {
++    webSocket: {
++      constructed: 0,
++      opened: 0,
++      messages: 0,
++      sent: 0,
++      closed: 0,
++      forcedFailures: 0,
++    },
++    fetch: { count: 0, sseFrameCount: 0, responses: [] },
++  };
++  const assistantChecks = {
++    initialTurn: false,
++    followUpTurn: false,
++    echoToolOutput: false,
++  };
++
++  try {
++    harness = await launchApp(profile, {
++      agentDir,
++      initialWorkspaces: [workspace],
++      scrubProviderEnv: true,
++      envOverrides: {
++        PI_APP_TEST_MODE: undefined,
++        HTTP_PROXY: "",
++        HTTPS_PROXY: "",
++        NO_PROXY: "",
++        http_proxy: "",
++        https_proxy: "",
++        no_proxy: "",
++      },
++    });
++    await harness.focusWindow();
++    const page = await harness.firstWindow();
++    const identity = await captureDoctor(harness, page, profile, evidenceDir, PACKAGED);
++    const instrumentation = await installNetworkCounters(harness, options.forceWebSocketFailure);
++    expect(instrumentation).toEqual({
++      webSocketWrapped: true,
++      fetchWrapped: true,
++      forceWebSocketFailure: options.forceWebSocketFailure,
++    });
++    await harness.electronApp.context().tracing.start({
++      screenshots: true,
++      snapshots: true,
++      sources: true,
++    });
++    traceStarted = true;
++
++    await sendInitialTurn(page);
++    const assistant = page.locator(".timeline-item--assistant .message__content");
++    await expect(assistant.last()).toContainText("PI_PROXY_TURN_ONE_OK", { timeout: 180_000 });
++    await expect
++      .poll(() => latestAssistantText(page), { timeout: 180_000 })
++      .toContain("PI_PROXY_TURN_ONE_OK");
++    const firstTurnAssistant = (await assistant.allTextContents()).join("\n");
++    expect(firstTurnAssistant).toContain("PI_PROXY_TURN_ONE_OK");
++    assistantChecks.initialTurn = true;
++    await expect(page.getByTestId("send")).not.toHaveAttribute("aria-label", "Stop run", {
++      timeout: 120_000,
++    });
++    await page.screenshot({ path: join(evidenceDir, "turn-one.png") });
++
++    const composer = page.getByTestId("composer");
++    await composer.fill(
++      "Use your shell tool to run exactly `echo PI_PROXY_ECHO_OK > proxy-tool-proof.txt && cat proxy-tool-proof.txt`. Wait until the command succeeds and its output is PI_PROXY_ECHO_OK, then reply with exactly PI_PROXY_TURN_TWO_OK.",
++    );
++    await composer.press("Enter");
++    await expect(assistant.last()).toContainText("PI_PROXY_TURN_TWO_OK", { timeout: 180_000 });
++    const finalAssistantText = (await assistant.allTextContents()).join("\n");
++    expect(finalAssistantText).toContain("PI_PROXY_TURN_ONE_OK");
++    expect(finalAssistantText).toContain("PI_PROXY_TURN_TWO_OK");
++    assistantChecks.followUpTurn = true;
++    await expect
++      .poll(() => page.locator(".timeline-tool").count(), { timeout: 120_000 })
++      .toBeGreaterThan(0);
++    const toolItem = page.locator(".timeline-tool").first();
++    const toolHeader = toolItem.locator(".timeline-tool__header");
++    await expect(toolItem).not.toHaveClass(/timeline-tool--failed/);
++    await toolHeader.click();
++    await expect(toolHeader).toHaveAttribute("aria-expanded", "true");
++    await expect(toolItem.locator(".timeline-tool__body")).toBeVisible();
++    await expect(toolItem.locator(".timeline-tool__pre")).toContainText("PI_PROXY_ECHO_OK");
++    const toolProof = await readFile(join(workspace, "proxy-tool-proof.txt"), "utf8");
++    expect(toolProof.trim()).toBe("PI_PROXY_ECHO_OK");
++    assistantChecks.echoToolOutput = true;
++
++    const networkEvidence = await readNetworkCounters(harness);
++    Object.assign(evidence, networkEvidence);
++    expect(evidence.webSocket.constructed).toBeGreaterThan(0);
++    if (options.forceWebSocketFailure) {
++      expect(evidence.webSocket.forcedFailures).toBeGreaterThan(0);
++      expect(
++        evidence.fetch.responses.some(
++          (response) =>
++            response.status === 200 &&
++            (response.contentType.toLowerCase().includes("text/event-stream") ||
++              response.sseFrames > 0),
++        ),
++      ).toBe(true);
++      expect(evidence.fetch.sseFrameCount).toBeGreaterThan(0);
++    } else {
++      expect(evidence.webSocket.opened).toBeGreaterThan(0);
++      expect(evidence.webSocket.messages).toBeGreaterThan(0);
++      expect(evidence.webSocket.sent).toBeGreaterThan(0);
++    }
++    expect(
++      relay.records.some(({ target, status }) => status === 200 && isChatGptTarget(target)),
++    ).toBe(true);
++    await page.screenshot({ path: join(evidenceDir, "completed.png") });
++
++    await writeFile(
++      join(evidenceDir, "doctor.json"),
++      JSON.stringify({ ...identity, provider: PROVIDER, model: MODEL }, null, 2),
++    );
++  } finally {
++    if (harness) {
++      try {
++        if (traceStarted) {
++          await harness.electronApp
++            .context()
++            .tracing.stop({ path: join(evidenceDir, "proxy-conversation.zip") });
++        }
++      } finally {
++        await harness.close();
++      }
++    }
++    await writeFile(
++      join(evidenceDir, "proxy-evidence.json"),
++      JSON.stringify(
++        {
++          mode: options.forceWebSocketFailure ? "websocket-failure-sse-fallback" : "websocket",
++          network: evidence,
++          relay: {
++            connectCount: relay.records.length,
++            tunnels: relay.records.map(({ target, status, clientBytes, proxyBytes }) => ({
++              target,
++              status,
++              clientBytes,
++              proxyBytes,
++            })),
++          },
++          assistantChecks,
++        },
++        null,
++        2,
++      ),
++    );
++    await relay.close();
++  }
++}
++
++function launchApp(
++  userDataDir: string,
++  options: Parameters<typeof launchDesktop>[1],
++): Promise<DesktopHarness> {
++  if (PACKAGED) {
++    return launchDesktopByExecutable(
++      resolve(
++        REPO_ROOT,
++        process.env.PI_PROXY_EXECUTABLE || "apps/desktop/release/win-unpacked/pi-gui.exe",
++      ),
++      userDataDir,
++      options,
++    );
++  }
++  return launchDesktop(userDataDir, options);
++}
++
++async function captureDoctor(
++  harness: DesktopHarness,
++  page: Page,
++  profile: string,
++  evidenceDir: string,
++  packaged: boolean,
++): Promise<Record<string, unknown>> {
++  const identity = await harness.electronApp.evaluate(({ app, BrowserWindow }) => ({
++    pid: process.pid,
++    userData: app.getPath("userData"),
++    appPath: app.getAppPath(),
++    isPackaged: app.isPackaged,
++    testMode: process.env.PI_APP_TEST_MODE ?? null,
++    testHooks: "__PI_APP_TEST_HOOKS" in globalThis,
++    visible: BrowserWindow.getAllWindows()[0]?.isVisible() ?? false,
++    focused: BrowserWindow.getAllWindows()[0]?.isFocused() ?? false,
++  }));
++  const documentFocused = await page.evaluate(() => document.hasFocus());
++  const doctor = { ...identity, documentFocused };
++  await writeFile(join(evidenceDir, "doctor.json"), JSON.stringify(doctor, null, 2));
++  expect(identity).toMatchObject({
++    isPackaged: packaged,
++    testMode: null,
++    testHooks: false,
++    visible: true,
++  });
++  expect(identity.focused || documentFocused).toBe(true);
++  expect(resolve(identity.userData)).toBe(resolve(profile));
++  if (!packaged) expect(resolve(identity.appPath)).toBe(DESKTOP_DIR);
++  return doctor;
++}
++
++async function installNetworkCounters(
++  harness: DesktopHarness,
++  forceWebSocketFailure: boolean,
++): Promise<{
++  webSocketWrapped: boolean;
++  fetchWrapped: boolean;
++  forceWebSocketFailure: boolean;
++}> {
++  return harness.electronApp.evaluate(
++    (_, { forceFailure }) => {
++      const state = {
++        webSocket: {
++          constructed: 0,
++          opened: 0,
++          messages: 0,
++          sent: 0,
++          closed: 0,
++          forcedFailures: 0,
++        },
++        fetch: {
++          count: 0,
++          sseFrameCount: 0,
++          responses: [] as Array<{
++            status: number;
++            contentType: string;
++            sseFrames: number;
++          }>,
++        },
++      };
++      const pendingScans: Promise<void>[] = [];
++      Object.defineProperty(globalThis, "__piProxyPendingSseScans", {
++        configurable: false,
++        enumerable: false,
++        value: pendingScans,
++      });
++      Object.defineProperty(globalThis, "__piProxyNetworkEvidence", {
++        configurable: false,
++        enumerable: false,
++        value: state,
++      });
++
++      const NativeWebSocket = globalThis.WebSocket;
++      class ObservedWebSocket extends NativeWebSocket {
++        constructor(url: string | URL, protocols?: string | string[]) {
++          state.webSocket.constructed += 1;
++          if (forceFailure) {
++            state.webSocket.forcedFailures += 1;
++            throw new Error("Intentional WebSocket failure for SSE fallback verification");
++          }
++          if (protocols === undefined) super(url);
++          else super(url, protocols);
++          this.addEventListener("open", () => state.webSocket.opened++);
++          this.addEventListener("message", () => state.webSocket.messages++);
++          this.addEventListener("close", () => state.webSocket.closed++);
++        }
++
++        override send(...args: Parameters<WebSocket["send"]>): void {
++          state.webSocket.sent += 1;
++          super.send(...args);
++        }
++      }
++      Object.defineProperty(globalThis, "WebSocket", {
++        configurable: true,
++        writable: true,
++        value: ObservedWebSocket,
++      });
++
++      const countOneSseFrame = async (response: Response): Promise<number> => {
++        const reader = response.body?.getReader();
++        if (!reader) return 0;
++        const decoder = new TextDecoder();
++        let scannedCharacters = 0;
++        let lineLength = 0;
++        let linePrefix = "";
++        let hasDataField = false;
++        try {
++          while (scannedCharacters < 65_536) {
++            const { done, value } = await reader.read();
++            const chunk = decoder.decode(value, { stream: !done });
++            for (const character of chunk) {
++              scannedCharacters += 1;
++              if (character === "\r") continue;
++              if (character === "\n") {
++                if (lineLength === 0) {
++                  if (hasDataField) return 1;
++                  hasDataField = false;
++                } else if (linePrefix === "data:") {
++                  hasDataField = true;
++                }
++                lineLength = 0;
++                linePrefix = "";
++              } else {
++                if (lineLength < 5) linePrefix += character;
++                lineLength += 1;
++              }
++              if (scannedCharacters >= 65_536) break;
++            }
++            if (done) return hasDataField || linePrefix === "data:" ? 1 : 0;
++          }
++          return 0;
++        } finally {
++          void reader.cancel().catch(() => {});
++        }
++      };
++
++      const nativeFetch = globalThis.fetch;
++      globalThis.fetch = async (input, init) => {
++        state.fetch.count += 1;
++        const response = await nativeFetch(input, init);
++        const responseEvidence = {
++          status: response.status,
++          contentType: response.headers.get("content-type") ?? "",
++          sseFrames: 0,
++        };
++        state.fetch.responses.push(responseEvidence);
++        const scan = countOneSseFrame(response.clone())
++          .then((count) => {
++            responseEvidence.sseFrames = count;
++            state.fetch.sseFrameCount += count;
++          })
++          .catch(() => {});
++        pendingScans.push(scan);
++        return response;
++      };
++      return {
++        webSocketWrapped: globalThis.WebSocket === ObservedWebSocket,
++        fetchWrapped: globalThis.fetch !== nativeFetch,
++        forceWebSocketFailure: forceFailure,
++      };
++    },
++    { forceFailure: forceWebSocketFailure },
++  );
++}
++
++async function readNetworkCounters(harness: DesktopHarness): Promise<NetworkEvidence> {
++  return harness.electronApp.evaluate(() => {
++    const state = (
++      globalThis as typeof globalThis & {
++        __piProxyNetworkEvidence: NetworkEvidence;
++      }
++    ).__piProxyNetworkEvidence;
++    const pendingScans = (
++      globalThis as typeof globalThis & { __piProxyPendingSseScans: Promise<void>[] }
++    ).__piProxyPendingSseScans;
++    return Promise.all(pendingScans).then(
++      () => JSON.parse(JSON.stringify(state)) as NetworkEvidence,
++    );
++  });
++}
++
++async function sendInitialTurn(page: Page): Promise<void> {
++  await page
++    .getByRole("complementary")
++    .getByRole("button", { name: "New thread", exact: true })
++    .click();
++  await page
++    .getByLabel("New thread prompt", { exact: true })
++    .fill("Do not use tools. Reply with exactly PI_PROXY_TURN_ONE_OK.");
++  await page.getByRole("button", { name: "Start thread", exact: true }).click();
++}
++
++async function latestAssistantText(page: Page): Promise<string> {
++  return (
++    (await page.locator(".timeline-item--assistant .message__content").last().textContent()) ?? ""
++  );
++}
++
++function isChatGptTarget(target: string): boolean {
++  const hostname = target.slice(0, target.lastIndexOf(":")).toLowerCase();
++  return hostname === "chatgpt.com" || hostname.endsWith(".chatgpt.com");
++}
++
++async function startConnectRelay(): Promise<ProxyRelay> {
++  const records: TunnelRecord[] = [];
++  const server = createServer((client) => {
++    let requestHeader = Buffer.alloc(0);
++    let upstream: Socket | undefined;
++    let connected = false;
++    let current: TunnelRecord | undefined;
++
++    const fail = () => {
++      client.destroy();
++      upstream?.destroy();
++    };
++    client.on("error", fail);
++    client.on("data", (chunk: Buffer) => {
++      if (connected && upstream && current) {
++        current.clientBytes += chunk.length;
++        upstream.write(chunk);
++        return;
++      }
++      requestHeader = Buffer.concat([requestHeader, chunk]);
++      const end = requestHeader.indexOf("\r\n\r\n");
++      if (end < 0) return;
++      const header = requestHeader.subarray(0, end).toString("latin1");
++      const match = /^CONNECT ([^\s]+) HTTP\/1\.[01]$/im.exec(header);
++      const target = match?.[1];
++      if (!target || !/^[-.\w\[\]:]+$/.test(target)) {
++        fail();
++        return;
++      }
++      const separator = target.lastIndexOf(":");
++      const hostname = target.startsWith("[")
++        ? target.slice(1, target.indexOf("]"))
++        : target.slice(0, separator);
++      const port = Number(target.slice(separator + 1));
++      if (!hostname || !Number.isInteger(port) || port < 1 || port > 65535) {
++        fail();
++        return;
++      }
++
++      upstream = connect({ host: "127.0.0.1", port: 7897 });
++      upstream.on("error", fail);
++      let proxyHeader = Buffer.alloc(0);
++      upstream.on("connect", () => {
++        upstream!.write(
++          `CONNECT ${target} HTTP/1.1\r\nHost: ${target}\r\nProxy-Connection: Keep-Alive\r\n\r\n`,
++        );
++      });
++      upstream.on("data", (proxyChunk: Buffer) => {
++        if (!connected) {
++          proxyHeader = Buffer.concat([proxyHeader, proxyChunk]);
++          const proxyEnd = proxyHeader.indexOf("\r\n\r\n");
++          if (proxyEnd < 0) return;
++          const responseHeader = proxyHeader.subarray(0, proxyEnd).toString("latin1");
++          const status = /^HTTP\/1\.[01] (\d{3})/i.exec(responseHeader)?.[1];
++          current = {
++            target: `${hostname}:${port}`,
++            status: Number(status ?? 0),
++            clientBytes: 0,
++            proxyBytes: 0,
++          };
++          records.push(current);
++          client.write(proxyHeader.subarray(0, proxyEnd + 4));
++          const initialPayload = proxyHeader.subarray(proxyEnd + 4);
++          if (initialPayload.length) {
++            current.proxyBytes += initialPayload.length;
++            client.write(initialPayload);
++          }
++          if (current.status !== 200) {
++            fail();
++            return;
++          }
++          connected = true;
++          const initialClientPayload = requestHeader.subarray(end + 4);
++          if (initialClientPayload.length) {
++            current.clientBytes += initialClientPayload.length;
++            upstream!.write(initialClientPayload);
++          }
++          return;
++        }
++        if (current) current.proxyBytes += proxyChunk.length;
++        client.write(proxyChunk);
++      });
++      client.removeAllListeners("data");
++      client.on("data", (data: Buffer) => {
++        if (!connected || !upstream || !current) return;
++        current.clientBytes += data.length;
++        upstream.write(data);
++      });
++      upstream.on("close", () => client.destroy());
++    });
++    client.on("close", () => upstream?.destroy());
++  });
++
++  await new Promise<void>((resolveListen, reject) => {
++    server.once("error", reject);
++    server.listen(0, "127.0.0.1", () => resolveListen());
++  });
++  const address = server.address();
++  if (!address || typeof address === "string") throw new Error("Could not start proxy relay.");
++  return {
++    url: `http://127.0.0.1:${address.port}`,
++    records,
++    close: () => new Promise<void>((resolveClose) => server.close(() => resolveClose())),
++  };
++}
+diff --git a/apps/desktop/tests/unit/desktop-proxy.spec.ts b/apps/desktop/tests/unit/desktop-proxy.spec.ts
+new file mode 100644
+index 0000000..940b6cc
+--- /dev/null
++++ b/apps/desktop/tests/unit/desktop-proxy.spec.ts
+@@ -0,0 +1,264 @@
++import { createHash } from "node:crypto";
++import { mkdtemp, readFile, writeFile } from "node:fs/promises";
++import { join, resolve } from "node:path";
++import { tmpdir } from "node:os";
++import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
++import { createServer as createHttpsServer } from "node:https";
++import { expect, test } from "@playwright/test";
++import { createJiti } from "jiti";
++import { fetch as undiciFetch, getGlobalDispatcher, setGlobalDispatcher } from "undici";
++import {
++  listenLoopback,
++  runNodeWithTrustedTestCertificate,
++  startLocalConnectProxy,
++} from "../helpers/proxy-fixture";
++
++const testCertificateDirectory = join(__dirname, "../fixtures/proxy");
++
++const jiti = createJiti(__filename);
++let createDesktopProxyDispatcher: typeof import("../../electron/network/desktop-proxy").createDesktopProxyDispatcher;
++let initializeDesktopProxy: typeof import("../../electron/network/desktop-proxy").initializeDesktopProxy;
++let resolveDesktopProxyOptions: typeof import("../../electron/network/desktop-proxy").resolveDesktopProxyOptions;
++test.beforeAll(async () => {
++  ({ createDesktopProxyDispatcher, initializeDesktopProxy, resolveDesktopProxyOptions } =
++    await jiti.import<typeof import("../../electron/network/desktop-proxy")>(
++      "../../electron/network/desktop-proxy.ts",
++    ));
++});
++
++test("resolves explicit, environment, and protocol-specific proxy configuration", () => {
++  const explicit = resolveDesktopProxyOptions(
++    { httpProxy: " https://user:pass@proxy.example:8443 " },
++    {
++      HTTP_PROXY: "http://env.example:8080",
++      HTTPS_PROXY: "http://secure.example:8081",
++      NO_PROXY: ".local",
++    },
++  );
++  expect(explicit).toEqual({
++    httpProxy: "https://user:pass@proxy.example:8443",
++    httpsProxy: "https://user:pass@proxy.example:8443",
++    noProxy: ".local",
++  });
++  expect(resolveDesktopProxyOptions({ httpProxy: "  " }, { HTTP_PROXY: "http://h:1" })).toEqual({
++    httpProxy: "http://h:1",
++    httpsProxy: "",
++    noProxy: "",
++  });
++  expect(resolveDesktopProxyOptions({}, { HTTPS_PROXY: "http://s:2" })).toEqual({
++    httpProxy: "",
++    httpsProxy: "http://s:2",
++    noProxy: "",
++  });
++  expect(resolveDesktopProxyOptions({}, {})).toEqual({
++    httpProxy: "",
++    httpsProxy: "",
++    noProxy: "",
++  });
++  expect(
++    resolveDesktopProxyOptions(
++      { httpProxy: "http://explicit.example:80" },
++      { HTTP_PROXY: "socks5://invalid:secret", HTTPS_PROXY: "not a proxy" },
++    ),
++  ).toEqual({
++    httpProxy: "http://explicit.example:80",
++    httpsProxy: "http://explicit.example:80",
++    noProxy: "",
++  });
++});
++
++test("rejects invalid explicit/environment proxy values without echoing credentials", () => {
++  for (const settings of [
++    { httpProxy: null },
++    { httpProxy: 7 },
++    { httpProxy: "socks5://u:p@host" },
++    { httpProxy: "http://u:p@%" },
++  ]) {
++    expect(() => resolveDesktopProxyOptions(settings, {})).toThrow("Invalid httpProxy");
++  }
++  expect(() =>
++    resolveDesktopProxyOptions({}, { HTTPS_PROXY: "socks5://name:secret@proxy" }),
++  ).toThrow("Invalid proxy environment configuration");
++});
++
++test("a local CONNECT proxy carries successive HTTP and SSE requests", async () => {
++  const requests: string[] = [];
++  const origin = createServer((request: IncomingMessage, response: ServerResponse) => {
++    requests.push(request.url ?? "");
++    if (request.url === "/events") {
++      response.writeHead(200, { "content-type": "text/event-stream" });
++      response.end("data: ready\n\n");
++      return;
++    }
++    response.writeHead(200, { "content-type": "application/json" });
++    response.end(JSON.stringify({ path: request.url }));
++  });
++  const originUrl = await listenLoopback(origin);
++  const proxy = await startLocalConnectProxy();
++  const previousDispatcher = getGlobalDispatcher();
++  const dispatcher = createDesktopProxyDispatcher({}, { HTTP_PROXY: proxy.url, NO_PROXY: "" });
++  try {
++    const one = await undiciFetch(`${originUrl}/first`, { dispatcher });
++    expect(await one.json()).toEqual({ path: "/first" });
++    const two = await undiciFetch(`${originUrl}/events`, { dispatcher });
++    expect(await two.text()).toBe("data: ready\n\n");
++    const three = await undiciFetch(`${originUrl}/after-tool`, { dispatcher });
++    expect(await three.json()).toEqual({ path: "/after-tool" });
++    expect(requests).toEqual(["/first", "/events", "/after-tool"]);
++    expect(proxy.tunnels()).toBeGreaterThanOrEqual(1);
++  } finally {
++    setGlobalDispatcher(previousDispatcher);
++    await dispatcher.close();
++    await proxy.close();
++    await new Promise<void>((resolve) => origin.close(() => resolve()));
++  }
++});
++
++test("NO_PROXY bypasses both explicit and environment proxy sources", async () => {
++  const origin = createServer((_request, response) => response.end("direct"));
++  const originUrl = await listenLoopback(origin);
++  const proxy = await startLocalConnectProxy();
++  for (const settings of [{ httpProxy: proxy.url }, {}]) {
++    const previousDispatcher = getGlobalDispatcher();
++    const dispatcher = createDesktopProxyDispatcher(settings, {
++      HTTP_PROXY: settings.httpProxy ? undefined : proxy.url,
++      NO_PROXY: "127.0.0.1",
++    });
++    try {
++      const response = await undiciFetch(originUrl, { dispatcher });
++      expect(await response.text()).toBe("direct");
++      expect(proxy.tunnels()).toBe(0);
++    } finally {
++      setGlobalDispatcher(previousDispatcher);
++      await dispatcher.close();
++    }
++  }
++  await proxy.close();
++  await new Promise<void>((resolve) => origin.close(() => resolve()));
++});
++
++test("an unreachable local proxy fails a real request without exposing proxy credentials", async () => {
++  const dispatcher = createDesktopProxyDispatcher(
++    {},
++    {
++      HTTP_PROXY: "http://private-user:private-password@127.0.0.1:1",
++      NO_PROXY: "",
++    },
++  );
++  try {
++    let message = "";
++    try {
++      await undiciFetch("http://example.invalid/", { dispatcher });
++    } catch (error) {
++      message = error instanceof Error ? error.message : String(error);
++    }
++    expect(message).not.toBe("");
++    expect(message).not.toContain("private-user");
++    expect(message).not.toContain("private-password");
++  } finally {
++    await dispatcher.close();
++  }
++});
++
++test("installed dispatcher carries a WebSocket handshake and message through CONNECT", async () => {
++  const origin = createServer();
++  origin.on("upgrade", (request, socket) => {
++    const key = request.headers["sec-websocket-key"];
++    if (typeof key !== "string") return socket.destroy();
++    const accept = createHash("sha1")
++      .update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`)
++      .digest("base64");
++    socket.write(
++      `HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`,
++    );
++    socket.write(Buffer.from([0x81, 0x02, 0x6f, 0x6b]));
++    socket.end();
++  });
++  const originUrl = await listenLoopback(origin);
++  const proxy = await startLocalConnectProxy();
++  const agentDir = await mkdtemp(join(tmpdir(), "pi-gui-proxy-ws-"));
++  await writeFile(
++    join(agentDir, "settings.json"),
++    JSON.stringify({ httpProxy: proxy.url }),
++    "utf8",
++  );
++  const previousDispatcher = getGlobalDispatcher();
++  const installedGlobalNames = [
++    "fetch",
++    "Headers",
++    "Request",
++    "Response",
++    "FormData",
++    "WebSocket",
++    "EventSource",
++  ];
++  const originalGlobals = new Map(
++    installedGlobalNames.map((name) => [name, Object.getOwnPropertyDescriptor(globalThis, name)]),
++  );
++  let installedDispatcher: Awaited<ReturnType<typeof initializeDesktopProxy>> | undefined;
++  try {
++    installedDispatcher = await initializeDesktopProxy({ agentDir, env: { NO_PROXY: "" } });
++    const message = await new Promise<string>((resolve, reject) => {
++      const socket = new WebSocket(originUrl.replace("http://", "ws://"));
++      socket.addEventListener("message", (event) => resolve(String(event.data)), { once: true });
++      socket.addEventListener("error", () => reject(new Error("WebSocket failed")), { once: true });
++    });
++    expect(message).toBe("ok");
++    expect(proxy.tunnels()).toBeGreaterThan(0);
++  } finally {
++    setGlobalDispatcher(previousDispatcher);
++    await installedDispatcher?.destroy();
++    for (const [name, descriptor] of originalGlobals) {
++      if (descriptor) Object.defineProperty(globalThis, name, descriptor);
++      else Reflect.deleteProperty(globalThis, name);
++    }
++    await proxy.close();
++    await new Promise<void>((resolve) => origin.close(() => resolve()));
++  }
++});
++
++test("HTTP_PROXY and HTTPS_PROXY route HTTP, HTTPS, and WSS through local CONNECT tunnels", async () => {
++  const [cert, key] = await Promise.all([
++    readFile(join(testCertificateDirectory, "localhost-cert.pem"), "utf8"),
++    readFile(join(testCertificateDirectory, "localhost-key.pem"), "utf8"),
++  ]);
++  const secureOrigin = createHttpsServer({ cert, key }, (_req, res) => {
++    res.writeHead(200, { "content-type": "text/plain" });
++    res.end("tls-through-proxy");
++  });
++  const websocketOrigin = createHttpsServer({ cert, key });
++  websocketOrigin.on("upgrade", (request, socket) => {
++    const keyHeader = request.headers["sec-websocket-key"];
++    if (typeof keyHeader !== "string") return socket.destroy();
++    const accept = createHash("sha1")
++      .update(`${keyHeader}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`)
++      .digest("base64");
++    socket.write(
++      `HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`,
++    );
++    socket.write(Buffer.from([0x81, 0x02, 0x6f, 0x6b]));
++    socket.end();
++  });
++  const plainOrigin = createServer((_req, res) => res.end("http-through-proxy"));
++  const plainUrl = await listenLoopback(plainOrigin);
++  const secureUrl = (await listenLoopback(secureOrigin)).replace("http://", "https://");
++  const websocketUrl = (await listenLoopback(websocketOrigin)).replace("http://", "wss://");
++  const httpProxy = await startLocalConnectProxy();
++  const httpsProxy = await startLocalConnectProxy();
++  try {
++    const { stdout } = await runNodeWithTrustedTestCertificate(
++      join(__dirname, "../helpers/proxy-tls-child.mjs"),
++      [httpProxy.url, httpsProxy.url, plainUrl, secureUrl, websocketUrl],
++      resolve(join(testCertificateDirectory, "localhost-cert.pem")),
++    );
++    expect(stdout).toContain("HTTP, HTTPS, and WSS proxy fixtures passed");
++    expect(httpProxy.tunnels()).toBeGreaterThan(0);
++    expect(httpsProxy.tunnels()).toBeGreaterThanOrEqual(2);
++  } finally {
++    await httpsProxy.close();
++    await httpProxy.close();
++    await new Promise<void>((resolve) => plainOrigin.close(() => resolve()));
++    await new Promise<void>((resolve) => secureOrigin.close(() => resolve()));
++    await new Promise<void>((resolve) => websocketOrigin.close(() => resolve()));
++  }
++});
+diff --git a/apps/desktop/tests/unit/provider-model-probe.spec.ts b/apps/desktop/tests/unit/provider-model-probe.spec.ts
+new file mode 100644
+index 0000000..a8ec543
+--- /dev/null
++++ b/apps/desktop/tests/unit/provider-model-probe.spec.ts
+@@ -0,0 +1,73 @@
++import { expect, test } from "@playwright/test";
++import { createJiti } from "jiti";
++
++const jiti = createJiti(__filename);
++let probeCustomProviderModels: typeof import("../../electron/network/provider-model-probe").probeCustomProviderModels;
++test.beforeAll(async () => {
++  ({ probeCustomProviderModels } = await jiti.import<
++    typeof import("../../electron/network/provider-model-probe")
++  >("../../electron/network/provider-model-probe.ts"));
++});
++
++test("model probe sends the models GET with Bearer auth and keeps usable IDs", async () => {
++  let requestedUrl = "";
++  let requestInit: RequestInit | undefined;
++  const fetchImpl: typeof fetch = async (input, init) => {
++    requestedUrl = String(input);
++    requestInit = init;
++    return new Response(JSON.stringify({ data: [{ id: "a" }, { id: "" }, {}, { id: "b" }] }), {
++      status: 200,
++      headers: { "content-type": "application/json" },
++    });
++  };
++  await expect(
++    probeCustomProviderModels(
++      { baseUrl: "http://provider.example/v1/", apiKey: " key " },
++      fetchImpl,
++    ),
++  ).resolves.toEqual({ ok: true, models: ["a", "b"] });
++  expect(requestedUrl).toBe("http://provider.example/v1/models");
++  expect(requestInit?.method).toBe("GET");
++  expect(new Headers(requestInit?.headers).get("authorization")).toBe("Bearer key");
++  expect(requestInit?.signal).toBeInstanceOf(AbortSignal);
++});
++
++test("model probe validates the base URL and reports response contracts", async () => {
++  const fetchImpl: typeof fetch = async () =>
++    new Response(JSON.stringify({ models: [] }), { status: 200 });
++  await expect(probeCustomProviderModels({ baseUrl: "file:///tmp" }, fetchImpl)).resolves.toEqual({
++    ok: false,
++    error: "Base URL must start with http:// or https://",
++  });
++  await expect(
++    probeCustomProviderModels({ baseUrl: "http://provider.example/v1" }, fetchImpl),
++  ).resolves.toMatchObject({
++    ok: false,
++    error: 'Response from http://provider.example/v1/models is missing a "data" array',
++  });
++  await expect(
++    probeCustomProviderModels(
++      { baseUrl: "http://user:secret@provider.example/v1" },
++      async () => new Response("unavailable", { status: 502, statusText: "Bad Gateway" }),
++    ),
++  ).resolves.toMatchObject({
++    ok: false,
++    error: "502 Bad Gateway from http://provider.example/v1/models",
++  });
++});
++
++test("model probe hides credentials when fetch fails", async () => {
++  const fetchImpl: typeof fetch = async () => {
++    throw new TypeError("fetch failed: http://proxy-user:proxy-secret@proxy.example:8080");
++  };
++  const result = await probeCustomProviderModels(
++    { baseUrl: "http://provider-user:provider-secret@provider.example/v1", apiKey: "token-secret" },
++    fetchImpl,
++  );
++  expect(result.ok).toBe(false);
++  if (!result.ok) {
++    expect(result.error).not.toContain("proxy-secret");
++    expect(result.error).not.toContain("provider-secret");
++    expect(result.error).not.toContain("token-secret");
++  }
++});
+-- 
+2.54.0.windows.1
+

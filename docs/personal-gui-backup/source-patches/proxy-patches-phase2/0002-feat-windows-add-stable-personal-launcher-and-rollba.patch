@@ -1,0 +1,464 @@
+From 8d1d7b1b37b62066aa9db86afeab499f44ccada1 Mon Sep 17 00:00:00 2001
+From: MyHome <283594170+new595@users.noreply.github.com>
+Date: Sat, 26 Sep 2026 08:20:08 +0800
+Subject: [PATCH 2/2] feat(windows): add stable personal launcher and rollback
+
+---
+ .../personal-build-valid/manifest.json        |   8 +
+ .../fixtures/personal-build-valid/pi-gui.exe  |   1 +
+ .../personal-build-valid/resources/app.asar   |   1 +
+ apps/desktop/scripts/personal-deploy.ps1      | 220 ++++++++++++++++++
+ apps/desktop/scripts/personal-deploy.test.ps1 | 131 +++++++++++
+ docs/personal-builds.md                       |  44 ++++
+ 6 files changed, 405 insertions(+)
+ create mode 100644 apps/desktop/scripts/fixtures/personal-build-valid/manifest.json
+ create mode 100644 apps/desktop/scripts/fixtures/personal-build-valid/pi-gui.exe
+ create mode 100644 apps/desktop/scripts/fixtures/personal-build-valid/resources/app.asar
+ create mode 100644 apps/desktop/scripts/personal-deploy.ps1
+ create mode 100644 apps/desktop/scripts/personal-deploy.test.ps1
+ create mode 100644 docs/personal-builds.md
+
+diff --git a/apps/desktop/scripts/fixtures/personal-build-valid/manifest.json b/apps/desktop/scripts/fixtures/personal-build-valid/manifest.json
+new file mode 100644
+index 0000000..78b2331
+--- /dev/null
++++ b/apps/desktop/scripts/fixtures/personal-build-valid/manifest.json
+@@ -0,0 +1,8 @@
++{
++  "id": "9.9.9-proxy.9",
++  "appVersion": "9.9.9",
++  "buildLabel": "synthetic",
++  "bundleHash": "7c6fb4e113662ca5d6242aa95a754d2fae341cb1f2c26703fd060f3ca8a333fc",
++  "baselineCommit": "fixture",
++  "source": "checked-in synthetic fixture"
++}
+diff --git a/apps/desktop/scripts/fixtures/personal-build-valid/pi-gui.exe b/apps/desktop/scripts/fixtures/personal-build-valid/pi-gui.exe
+new file mode 100644
+index 0000000..eeda270
+--- /dev/null
++++ b/apps/desktop/scripts/fixtures/personal-build-valid/pi-gui.exe
+@@ -0,0 +1 @@
++synthetic personal build fixture; not executable
+diff --git a/apps/desktop/scripts/fixtures/personal-build-valid/resources/app.asar b/apps/desktop/scripts/fixtures/personal-build-valid/resources/app.asar
+new file mode 100644
+index 0000000..6672550
+--- /dev/null
++++ b/apps/desktop/scripts/fixtures/personal-build-valid/resources/app.asar
+@@ -0,0 +1 @@
++synthetic app archive for deployment validation
+diff --git a/apps/desktop/scripts/personal-deploy.ps1 b/apps/desktop/scripts/personal-deploy.ps1
+new file mode 100644
+index 0000000..815d295
+--- /dev/null
++++ b/apps/desktop/scripts/personal-deploy.ps1
+@@ -0,0 +1,220 @@
++[CmdletBinding()]
++param(
++  [Parameter(Mandatory = $true)]
++  [ValidateSet('Bootstrap', 'List', 'Install', 'Activate', 'Rollback', 'Launch')]
++  [string]$Mode,
++  [string]$Id,
++  [string]$BundlePath,
++  [string]$Root = 'F:\Apps\pi-gui-proxy'
++)
++
++$ErrorActionPreference = 'Stop'
++Set-StrictMode -Version Latest
++
++function Assert-Id([string]$Value) {
++  if ($Value -cnotmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?-proxy\.\d+$') {
++    throw "Invalid personal build id: $Value"
++  }
++}
++
++function Get-InstallRoot {
++  return [System.IO.Path]::GetFullPath($Root).TrimEnd('\')
++}
++
++function Get-VersionPath([string]$Value) {
++  Assert-Id $Value
++  $rootPath = Get-InstallRoot
++  $versions = [System.IO.Path]::GetFullPath((Join-Path $rootPath 'versions')).TrimEnd('\')
++  $path = [System.IO.Path]::GetFullPath((Join-Path $versions $Value))
++  if (-not $path.StartsWith($versions + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
++    throw "Version path escaped versions directory: $Value"
++  }
++  return $path
++}
++
++function Get-ValidatedVersion([string]$Value) {
++  $path = Get-VersionPath $Value
++  $manifestPath = Join-Path $path 'manifest.json'
++  $exe = Join-Path $path 'pi-gui.exe'
++  if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf) -or
++      -not (Test-Path -LiteralPath $exe -PathType Leaf)) {
++    throw "Incomplete installed personal build: $Value"
++  }
++  $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
++  if ($manifest.id -cne $Value -or [string]::IsNullOrWhiteSpace([string]$manifest.bundleHash)) {
++    throw "Manifest does not validate personal build: $Value"
++  }
++  $asar = Join-Path $path 'resources/app.asar'
++  if (-not (Test-Path -LiteralPath $asar -PathType Leaf)) { throw "Missing packaged app archive: $Value" }
++  $actualHash = (Get-FileHash -LiteralPath $asar -Algorithm SHA256).Hash.ToLowerInvariant()
++  if ($actualHash -cne ([string]$manifest.bundleHash).ToLowerInvariant()) { throw "Bundle hash mismatch: $Value" }
++  return [pscustomobject]@{ Id = $Value; Path = $path; Manifest = $manifest }
++}
++
++function Get-State {
++  $statePath = Join-Path (Get-InstallRoot) 'state.json'
++  if (-not (Test-Path -LiteralPath $statePath -PathType Leaf)) {
++    return [pscustomobject]@{ current = $null; previous = $null }
++  }
++  $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
++  foreach ($key in @('current', 'previous')) {
++    $value = [string]$state.$key
++    if ($value) { Assert-Id $value }
++  }
++  return $state
++}
++
++function Write-State($State) {
++  $rootPath = Get-InstallRoot
++  New-Item -ItemType Directory -Path $rootPath -Force | Out-Null
++  $target = Join-Path $rootPath 'state.json'
++  $temporary = Join-Path $rootPath ('.state-' + [guid]::NewGuid().ToString('N') + '.tmp')
++  $json = $State | ConvertTo-Json -Compress
++  [System.IO.File]::WriteAllText($temporary, $json + "`n", [System.Text.UTF8Encoding]::new($false))
++  if (-not ('PiGuiPersonalDeploy.NativeMove' -as [type])) {
++      Add-Type -TypeDefinition @'
++using System;
++using System.ComponentModel;
++using System.Runtime.InteropServices;
++namespace PiGuiPersonalDeploy {
++  public static class NativeMove {
++    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
++    private static extern bool MoveFileEx(string existing, string replacement, int flags);
++    public static void Replace(string source, string destination) {
++      if (!MoveFileEx(source, destination, 0x1 | 0x8)) {
++        throw new Win32Exception(Marshal.GetLastWin32Error());
++      }
++    }
++  }
++}
++'@
++  }
++  # Keep a failed temporary state file for diagnosis. The current state remains
++  # untouched unless this same-volume atomic replace succeeds.
++  [PiGuiPersonalDeploy.NativeMove]::Replace($temporary, $target)
++}
++
++function Assert-BundleDirectory([string]$Path, [string]$ExpectedId) {
++  $manifestPath = Join-Path $Path 'manifest.json'
++  $exe = Join-Path $Path 'pi-gui.exe'
++  $asar = Join-Path $Path 'resources/app.asar'
++  foreach ($required in @($manifestPath, $exe, $asar)) {
++    if (-not (Test-Path -LiteralPath $required -PathType Leaf)) { throw "Incomplete bundle: missing $required" }
++  }
++  $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
++  if ($manifest.id -cne $ExpectedId -or [string]::IsNullOrWhiteSpace([string]$manifest.bundleHash)) {
++    throw "Bundle manifest does not validate personal build: $ExpectedId"
++  }
++  $actualHash = (Get-FileHash -LiteralPath $asar -Algorithm SHA256).Hash.ToLowerInvariant()
++  if ($actualHash -cne ([string]$manifest.bundleHash).ToLowerInvariant()) { throw "Bundle hash mismatch: $ExpectedId" }
++  return $manifest
++}
++
++function Set-Active([string]$Value) {
++  $null = Get-ValidatedVersion $Value
++  $state = Get-State
++  if ($state.current -ceq $Value) {
++    Write-Host "Already active for next launch: $Value"
++    return
++  }
++  $next = [pscustomobject]@{ current = $Value; previous = [string]$state.current }
++  Write-State $next
++  Write-Host "Selected for next full launch: $Value"
++}
++
++switch ($Mode) {
++  'Bootstrap' {
++    $rootPath = Get-InstallRoot
++    $scriptsPath = Join-Path $rootPath 'scripts'
++    $targetScript = Join-Path $scriptsPath 'personal-deploy.ps1'
++    $targetLauncher = Join-Path $rootPath 'pi-gui-proxy.cmd'
++    $targetShortcut = Join-Path $rootPath 'Start pi-gui proxy.lnk'
++    if ((Test-Path -LiteralPath $targetScript) -or (Test-Path -LiteralPath $targetLauncher) -or (Test-Path -LiteralPath $targetShortcut)) {
++      throw 'Launcher or deployment script already exists; refusing overwrite'
++    }
++    New-Item -ItemType Directory -Path $scriptsPath -Force | Out-Null
++    Copy-Item -LiteralPath $PSCommandPath -Destination $targetScript
++    $launcher = "@echo off`r`nsetlocal`r`npowershell.exe -NoLogo -NoProfile -ExecutionPolicy RemoteSigned -File `"%~dp0scripts\personal-deploy.ps1`" -Mode Launch -Root `"%~dp0.`"`r`n"
++    [System.IO.File]::WriteAllText($targetLauncher, $launcher, [System.Text.Encoding]::ASCII)
++    $shell = New-Object -ComObject WScript.Shell
++    $shortcut = $shell.CreateShortcut($targetShortcut)
++    $shortcut.TargetPath = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
++    $shortcut.Arguments = "-NoProfile -ExecutionPolicy RemoteSigned -WindowStyle Hidden -File `"$targetScript`" -Mode Launch -Root `"$rootPath`""
++    $shortcut.WorkingDirectory = $rootPath
++    $shortcut.Description = 'Start pi-gui using the selected personal build'
++    $shortcut.Save()
++    [void][Runtime.InteropServices.Marshal]::ReleaseComObject($shortcut)
++    [void][Runtime.InteropServices.Marshal]::ReleaseComObject($shell)
++    Write-Host "Installed fixed launcher: $targetLauncher"
++  }
++  'List' {
++    $versionsRoot = Join-Path (Get-InstallRoot) 'versions'
++    $state = Get-State
++    if (Test-Path -LiteralPath $versionsRoot -PathType Container) {
++      Get-ChildItem -LiteralPath $versionsRoot -Directory | Sort-Object Name | ForEach-Object {
++        try {
++          $version = Get-ValidatedVersion $_.Name
++          [pscustomobject]@{ Id = $version.Id; Active = ($state.current -ceq $version.Id); Previous = ($state.previous -ceq $version.Id); Label = $version.Manifest.buildLabel }
++        } catch {
++          [pscustomobject]@{ Id = $_.Name; Active = $false; Previous = $false; Label = 'INVALID' }
++        }
++      }
++    }
++  }
++  'Install' {
++    Assert-Id $Id
++    if (-not $BundlePath) { throw '-BundlePath is required for Install' }
++    $source = (Resolve-Path -LiteralPath $BundlePath).Path
++    if (-not (Test-Path -LiteralPath $source -PathType Container)) { throw 'BundlePath must be an unpacked bundle directory' }
++    $source = [System.IO.Path]::GetFullPath($source).TrimEnd('\')
++    $final = Get-VersionPath $Id
++    $versionsRoot = [System.IO.Path]::GetFullPath((Join-Path (Get-InstallRoot) 'versions')).TrimEnd('\')
++    if ($source -ieq (Get-InstallRoot) -or
++        $source.StartsWith((Get-InstallRoot) + '\', [System.StringComparison]::OrdinalIgnoreCase) -or
++        (Get-InstallRoot).StartsWith($source + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
++      throw 'Bundle source and installation root overlap; refusing recursive or self-copy'
++    }
++    if (-not $final.StartsWith($versionsRoot + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
++      throw 'Final version path escaped versions directory'
++    }
++    if (Test-Path -LiteralPath $final) { throw "Refusing to overwrite existing version: $Id" }
++    $parsed = Assert-BundleDirectory $source $Id
++    $rootPath = Get-InstallRoot
++    New-Item -ItemType Directory -Path $versionsRoot -Force | Out-Null
++    $stage = Join-Path $versionsRoot ('.install-' + [guid]::NewGuid().ToString('N'))
++    $stage = [System.IO.Path]::GetFullPath($stage)
++    if (-not $stage.StartsWith($versionsRoot + '\', [System.StringComparison]::OrdinalIgnoreCase) -or
++        -not $final.StartsWith($versionsRoot + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
++      throw 'Install stage or final path escaped versions directory'
++    }
++    if (Test-Path -LiteralPath $stage) { throw "Install staging path already exists: $stage" }
++    Copy-Item -LiteralPath $source -Destination $stage -Recurse
++    $stagedManifest = Assert-BundleDirectory $stage $Id
++    if ($stagedManifest.bundleHash -cne $parsed.bundleHash) { throw 'Staged bundle manifest changed during copy' }
++    if (Test-Path -LiteralPath $final) { throw "Refusing to overwrite existing version: $Id" }
++    [System.IO.Directory]::Move($stage, $final)
++    Write-Host "Installed immutable personal build: $Id (not activated)"
++  }
++  'Activate' { Set-Active $Id }
++  'Rollback' {
++    $state = Get-State
++    if (-not $state.previous) { throw 'No previous installed build is available for rollback' }
++    Set-Active ([string]$state.previous)
++  }
++  'Launch' {
++    $state = Get-State
++    if (-not $state.current) { throw 'No active personal build. Run personal-deploy.ps1 -Mode List/Activate first.' }
++    $version = Get-ValidatedVersion ([string]$state.current)
++    $exe = Join-Path $version.Path 'pi-gui.exe'
++    $dataRoot = Join-Path $env:LOCALAPPDATA 'pi-gui-proxy-build'
++    $priorExists = Test-Path Env:PI_APP_USER_DATA_DIR
++    $priorValue = $env:PI_APP_USER_DATA_DIR
++    try {
++      $env:PI_APP_USER_DATA_DIR = $dataRoot
++      Start-Process -FilePath $exe -WorkingDirectory $version.Path
++    } finally {
++      if ($priorExists) { $env:PI_APP_USER_DATA_DIR = $priorValue }
++      else { Remove-Item Env:PI_APP_USER_DATA_DIR -ErrorAction SilentlyContinue }
++    }
++  }
++}
+diff --git a/apps/desktop/scripts/personal-deploy.test.ps1 b/apps/desktop/scripts/personal-deploy.test.ps1
+new file mode 100644
+index 0000000..83ab801
+--- /dev/null
++++ b/apps/desktop/scripts/personal-deploy.test.ps1
+@@ -0,0 +1,131 @@
++$ErrorActionPreference = 'Stop'
++Set-StrictMode -Version Latest
++
++$deploy = Join-Path $PSScriptRoot 'personal-deploy.ps1'
++$fixture = Join-Path $PSScriptRoot 'fixtures/personal-build-valid'
++$testArtifacts = Join-Path ([System.IO.Path]::GetTempPath()) ('pi-gui-deploy-test-' + [guid]::NewGuid().ToString('N'))
++$root = Join-Path $testArtifacts 'deployment root'
++
++function Invoke-ExpectedFailure([string[]]$Arguments, [string]$Description) {
++  & powershell.exe -NoLogo -NoProfile -ExecutionPolicy RemoteSigned -File $deploy @Arguments
++  if ($LASTEXITCODE -eq 0) { throw "Expected failure: $Description" }
++  Write-Host "ok - $Description"
++}
++
++function New-LaunchProbe([string]$ExePath) {
++  $code = @'
++using System;
++using System.IO;
++public static class PersonalBuildLaunchProbe {
++  public static int Main() {
++    File.WriteAllText(Environment.GetEnvironmentVariable("PI_TEST_ENV_OUTPUT"),
++      Environment.GetEnvironmentVariable("PI_APP_USER_DATA_DIR") ?? "<missing>");
++    return 0;
++  }
++}
++'@
++  Add-Type -TypeDefinition $code -OutputAssembly $ExePath -OutputType ConsoleApplication
++}
++
++function New-SyntheticBundle([string]$Id, [string]$Path, [switch]$BadHash) {
++  Copy-Item -LiteralPath $fixture -Destination $Path -Recurse
++  $manifestPath = Join-Path $Path 'manifest.json'
++  $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
++  $manifest.id = $Id
++  if ($BadHash) { $manifest.bundleHash = ('0' * 64) }
++  [System.IO.File]::WriteAllText($manifestPath, ($manifest | ConvertTo-Json), [System.Text.UTF8Encoding]::new($false))
++}
++
++try {
++  $firstBundle = Join-Path $testArtifacts 'bundle-first'
++  New-Item -ItemType Directory -Path $root -Force | Out-Null
++  New-SyntheticBundle '9.9.9-proxy.9' $firstBundle
++  $common = @('-Root', $root)
++  & powershell.exe -NoLogo -NoProfile -ExecutionPolicy RemoteSigned -File $deploy -Mode Install -Id '9.9.9-proxy.9' -BundlePath $firstBundle @common
++  if ($LASTEXITCODE -ne 0) { throw 'First synthetic install failed' }
++  Write-Host 'ok - valid synthetic bundle installs without activation'
++
++  Invoke-ExpectedFailure (@('-Mode', 'Install', '-Id', '9.9.9-proxy.9', '-BundlePath', $firstBundle) + $common) 'existing version is never overwritten'
++  Invoke-ExpectedFailure (@('-Mode', 'Activate', '-Id', '..\outside') + $common) 'path traversal build id is rejected'
++  Invoke-ExpectedFailure (@('-Mode', 'Activate', '-Id', '9.9.8-proxy.8') + $common) 'unknown version is not activated'
++  Invoke-ExpectedFailure (@('-Mode', 'Install', '-Id', '9.9.12-proxy.12', '-BundlePath', $root) + $common) 'bundle source overlapping install root is rejected'
++
++  $secondBundle = Join-Path $testArtifacts 'bundle-second'
++  New-SyntheticBundle '9.9.10-proxy.10' $secondBundle
++  & powershell.exe -NoLogo -NoProfile -ExecutionPolicy RemoteSigned -File $deploy -Mode Install -Id '9.9.10-proxy.10' -BundlePath $secondBundle @common
++  if ($LASTEXITCODE -ne 0) { throw 'Second synthetic install failed' }
++  & powershell.exe -NoLogo -NoProfile -ExecutionPolicy RemoteSigned -File $deploy -Mode Activate -Id '9.9.9-proxy.9' @common
++  if ($LASTEXITCODE -ne 0) { throw 'First activation failed' }
++  & powershell.exe -NoLogo -NoProfile -ExecutionPolicy RemoteSigned -File $deploy -Mode Activate -Id '9.9.10-proxy.10' @common
++  if ($LASTEXITCODE -ne 0) { throw 'Second activation failed' }
++  & powershell.exe -NoLogo -NoProfile -ExecutionPolicy RemoteSigned -File $deploy -Mode Rollback @common
++  if ($LASTEXITCODE -ne 0) { throw 'Rollback failed' }
++  $statePath = Join-Path $root 'state.json'
++  $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
++  if ($state.current -cne '9.9.9-proxy.9') { throw "Unexpected active version after rollback: $($state.current)" }
++  Write-Host 'ok - rollback selects the previously active build'
++
++  Set-Content -LiteralPath (Join-Path $root 'versions/9.9.10-proxy.10/resources/app.asar') -Value 'corrupted fixture'
++  Invoke-ExpectedFailure (@('-Mode', 'Rollback') + $common) 'corrupt rollback target is rejected'
++  $afterFailure = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
++  if ($afterFailure.current -cne '9.9.9-proxy.9') { throw 'Failed rollback changed the active pointer' }
++  Write-Host 'ok - failed rollback leaves the active version unchanged'
++
++  $badBundle = Join-Path $testArtifacts 'bundle-bad-hash'
++  New-SyntheticBundle '9.9.11-proxy.11' $badBundle -BadHash
++  Invoke-ExpectedFailure (@('-Mode', 'Install', '-Id', '9.9.11-proxy.11', '-BundlePath', $badBundle) + $common) 'bundle hash mismatch prevents installation'
++  if (Test-Path -LiteralPath (Join-Path $root 'versions/9.9.11-proxy.11')) { throw 'Failed install left an installed version' }
++  $afterInstallFailure = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
++  if ($afterInstallFailure.current -cne '9.9.9-proxy.9') { throw 'Failed install changed the active pointer' }
++  Write-Host 'ok - failed install leaves no version and cannot change activation'
++
++  # Exercise direct Launch scope and a real generated CMD entry point from a
++  # root containing spaces and CMD metacharacters.
++  $launchBundle = Join-Path $testArtifacts 'bundle-launch'
++  New-SyntheticBundle '9.9.12-proxy.12' $launchBundle
++  New-LaunchProbe (Join-Path $launchBundle 'pi-gui.exe')
++  & powershell.exe -NoLogo -NoProfile -ExecutionPolicy RemoteSigned -File $deploy -Mode Install -Id '9.9.12-proxy.12' -BundlePath $launchBundle @common
++  if ($LASTEXITCODE -ne 0) { throw 'Launch probe install failed' }
++  & powershell.exe -NoLogo -NoProfile -ExecutionPolicy RemoteSigned -File $deploy -Mode Activate -Id '9.9.12-proxy.12' @common
++  if ($LASTEXITCODE -ne 0) { throw 'Launch probe activation failed' }
++
++  $outputPath = Join-Path $root 'direct-launch-env.txt'
++  $env:PI_TEST_ENV_OUTPUT = $outputPath
++  $env:PI_APP_USER_DATA_DIR = 'sentinel-restore-check'
++  try {
++    & $deploy -Mode Launch -Root $root
++    $deadline = [DateTime]::UtcNow.AddSeconds(10)
++    while (-not (Test-Path -LiteralPath $outputPath) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 100 }
++    if ((Get-Content -LiteralPath $outputPath -Raw) -ne (Join-Path $env:LOCALAPPDATA 'pi-gui-proxy-build')) { throw 'Direct launch child inherited the wrong app data path' }
++    if ($env:PI_APP_USER_DATA_DIR -cne 'sentinel-restore-check') { throw 'Direct launch did not restore the caller environment' }
++  } finally {
++    Remove-Item Env:PI_TEST_ENV_OUTPUT -ErrorAction SilentlyContinue
++    Remove-Item Env:PI_APP_USER_DATA_DIR -ErrorAction SilentlyContinue
++  }
++  Write-Host 'ok - direct launch scopes user data to child and restores the caller environment'
++
++  $cmdRoot = Join-Path $testArtifacts 'launcher root & spaces'
++  $cmdBundle = Join-Path $testArtifacts 'bundle-cmd'
++  New-SyntheticBundle '9.9.13-proxy.13' $cmdBundle
++  New-LaunchProbe (Join-Path $cmdBundle 'pi-gui.exe')
++  & powershell.exe -NoLogo -NoProfile -ExecutionPolicy RemoteSigned -File $deploy -Mode Install -Id '9.9.13-proxy.13' -BundlePath $cmdBundle -Root $cmdRoot
++  if ($LASTEXITCODE -ne 0) { throw 'CMD probe install failed' }
++  & powershell.exe -NoLogo -NoProfile -ExecutionPolicy RemoteSigned -File $deploy -Mode Activate -Id '9.9.13-proxy.13' -Root $cmdRoot
++  if ($LASTEXITCODE -ne 0) { throw 'CMD probe activation failed' }
++  & $deploy -Mode Bootstrap -Root $cmdRoot
++  $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut((Join-Path $cmdRoot 'Start pi-gui proxy.lnk'))
++  if ($shortcut.Arguments -notmatch '-ExecutionPolicy RemoteSigned') { throw 'Start shortcut must use per-process RemoteSigned' }
++  if ($shortcut.Arguments -notmatch [regex]::Escape('"' + $cmdRoot + '"')) { throw 'Start shortcut did not quote the fixed root argument' }
++  $cmdOutput = Join-Path $root 'cmd-launch-env.txt'
++  $env:PI_TEST_ENV_OUTPUT = $cmdOutput
++  $cmdLine = '/d /c ""{0}"' -f (Join-Path $cmdRoot 'pi-gui-proxy.cmd')
++  $cmdProcess = Start-Process -FilePath $env:ComSpec -ArgumentList $cmdLine -WindowStyle Hidden -PassThru -Wait
++  if ($cmdProcess.ExitCode -ne 0) { throw "CMD launcher exited with $($cmdProcess.ExitCode)" }
++  if (-not (Test-Path -LiteralPath $cmdOutput)) { throw 'Generated CMD launcher did not start its selected build' }
++  if ((Get-Content -LiteralPath $cmdOutput -Raw) -ne (Join-Path $env:LOCALAPPDATA 'pi-gui-proxy-build')) { throw 'CMD launcher child inherited the wrong app data path' }
++  Remove-Item Env:PI_TEST_ENV_OUTPUT -ErrorAction SilentlyContinue
++  Write-Host 'ok - generated CMD launcher safely forwards a root with spaces and ampersand'
++}
++finally {
++  Write-Host "Synthetic deployment artifacts retained for diagnosis: $testArtifacts"
++}
+diff --git a/docs/personal-builds.md b/docs/personal-builds.md
+new file mode 100644
+index 0000000..fe84902
+--- /dev/null
++++ b/docs/personal-builds.md
+@@ -0,0 +1,44 @@
++# Windows personal builds
++
++Personal Windows builds live in `F:\Apps\pi-gui-proxy\versions\<id>`. Each installed id is an immutable directory containing the unpacked Electron application and a `manifest.json`. The stable launcher is `F:\Apps\pi-gui-proxy\pi-gui-proxy.cmd`; its selected version is recorded in `state.json` as `current` and `previous`.
++
++The `Start pi-gui proxy.lnk` shortcut launches a hidden PowerShell helper; the selected Pi GUI remains a normal visible application. `pi-gui-proxy.cmd` is available as a backup entry point. Both read and validate the selected manifest and SHA256 of `resources/app.asar` each time they start. Selection changes affect the next full launch. The deploy tool never terminates a running process and never migrates or removes app data. Personal build identity is the package version plus build label, for example `0.1.0-beta.40-proxy.2`.
++
++## First setup
++
++Run the following from a PowerShell prompt in the repository. The bootstrap refuses to overwrite an existing launcher or deployment script.
++
++```powershell
++powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File .\apps\desktop\scripts\personal-deploy.ps1 -Mode Bootstrap
++# On an empty stable directory, install this build before activating it.
++$deploy = 'F:\Apps\pi-gui-proxy\scripts\personal-deploy.ps1'
++powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File $deploy -Mode Install -Id 0.1.0-beta.40-proxy.1 -BundlePath F:\path\to\proxy.1\win-unpacked
++powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File $deploy -Mode Activate -Id 0.1.0-beta.40-proxy.1
++```
++
++Bootstrap installs the shortcut, fixed command launcher, and a copy of the deployment script under the stable directory. `-ExecutionPolicy RemoteSigned` applies only to that PowerShell process; it does not alter machine or user policy. On the current personal install, `proxy.1` is already installed; the activation command above is a maintenance example. For a new install, use the actual unpacked build path and matching id.
++
++## Install and switch builds
++
++Build the unpacked Windows app with the selected personal label and create a `manifest.json` beside `pi-gui.exe`. The manifest's `id` must match `<package-version>-<build-label>`, and `bundleHash` must be the lowercase SHA256 of `resources/app.asar`. Then install and select it:
++
++```powershell
++$deploy = 'F:\Apps\pi-gui-proxy\scripts\personal-deploy.ps1'
++powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File $deploy -Mode Install -Id 0.1.0-beta.40-proxy.2 -BundlePath F:\path\to\win-unpacked
++powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File $deploy -Mode List
++powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File $deploy -Mode Activate -Id 0.1.0-beta.40-proxy.2
++```
++
++`Install` refuses an existing id and does not activate it. `Activate` accepts only a complete version directory with a matching manifest and app archive hash. The state file is replaced atomically, so an interrupted or invalid switch leaves the prior selection intact.
++
++Rollback to the previously selected installed version:
++
++```powershell
++powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File $deploy -Mode Rollback
++```
++
++The rollback command above selects the previous build; to switch to a specific installed version, run `powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File $deploy -Mode Activate -Id 0.1.0-beta.40-proxy.1`. Close the app normally and use `Start pi-gui proxy.lnk` for the next full start. Switching never force-closes an open app. The launcher scopes `PI_APP_USER_DATA_DIR` to `%LOCALAPPDATA%\pi-gui-proxy-build` for the GUI child process, then restores its own environment. The app continues to use the existing Pi configuration and authentication in the user's normal profile; the personal deploy tool does not read credentials or modify those settings.
++
++## Synthetic verification
++
++Run `powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File apps\desktop\scripts\personal-deploy.test.ps1` to exercise synthetic installs, overwrite and invalid-id rejection, source-path overlap protection, activation, rollback, corrupt target rejection, hash failure, child-only user-data scoping, and the generated CMD launcher with a root containing spaces and `&`. The test retains its temporary deployment artifacts for diagnosis and never accesses user credentials.
+-- 
+2.54.0.windows.1
+
